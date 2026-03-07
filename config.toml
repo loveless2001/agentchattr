@@ -25,6 +25,12 @@ cwd = ".."
 color = "#4285f4"
 label = "Gemini"
 
+[agents.kimi]
+command = "kimi"
+cwd = ".."
+color = "#7C3AED"
+label = "Kimi"
+
 [routing]
 # "none" = only route on explicit @mention. "all" = route to all agents by default.
 default = "none"
@@ -39,7 +45,7 @@ upload_dir = "./uploads"
 max_size_mb = 10
 
 # --- MCP injection modes ---
-# By default, claude/codex/gemini use built-in MCP config injection.
+# By default, claude/codex/gemini/kimi use built-in MCP config injection.
 # For other CLI agents, set mcp_inject to tell the wrapper how to inject auth:
 #
 # mcp_inject modes:

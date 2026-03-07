@@ -4,6 +4,7 @@ Usage:
     python wrapper.py claude
     python wrapper.py codex
     python wrapper.py gemini
+    python wrapper.py kimi
 
 Cross-platform:
   - Windows: injects keystrokes via Win32 WriteConsoleInput (wrapper_windows.py)
@@ -117,6 +118,11 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
     "codex": {
         "mcp_inject": "proxy_flag",
         "mcp_proxy_flag_template": '-c mcp_servers.{server}.url="{url}"',
+    },
+    "kimi": {
+        "mcp_inject": "flag",
+        "mcp_flag": "--mcp-config-file",
+        "mcp_transport": "http",
     },
 }
 
