@@ -754,7 +754,7 @@ main#timeline {
     border-top-left-radius: 4px;
     padding: 8px 14px;
     max-width: 85%;
-    min-width: 80px;
+    min-width: 0;
     overflow-wrap: break-word;
     position: relative;
 }
@@ -1854,6 +1854,7 @@ main#timeline {
 
 .msg-text {
     word-break: break-word;
+    overflow: hidden;
 }
 
 .msg-text .mention {
@@ -1946,6 +1947,9 @@ main#timeline {
     border-collapse: collapse;
     margin: 6px 0;
     font-size: 0.9em;
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
 }
 
 .msg-text th, .msg-text td {
