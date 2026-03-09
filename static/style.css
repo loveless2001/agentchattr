@@ -1854,7 +1854,7 @@ main#timeline {
 
 .msg-text {
     word-break: break-word;
-    overflow: hidden;
+    overflow-x: hidden;
 }
 
 .msg-text .mention {
@@ -1875,11 +1875,18 @@ main#timeline {
 .msg-text strong { font-weight: 700; color: #f0f0f5; }
 .msg-text em { font-style: italic; }
 
+.msg-text img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-md);
+}
+
 .msg-text code {
     background: var(--white-08);
     padding: 1px 5px;
     border-radius: 3px;
     font-size: 0.9em;
+    overflow-wrap: anywhere;
 }
 
 .msg-text pre {
