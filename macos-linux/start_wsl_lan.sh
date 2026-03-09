@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentchattr - starts the server in the background
+# agentchattr - starts the server for WSL/LAN access and prints the setup command
 cd "$(dirname "$0")/.."
 
 AUTO_APPROVE=0
@@ -10,7 +10,7 @@ for arg in "$@"; do
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: sh macos-linux/start.sh [--skip-permissions]"
+            echo "Usage: sh macos-linux/start_wsl_lan.sh [--skip-permissions]"
             exit 1
             ;;
     esac
@@ -45,50 +45,43 @@ ensure_venv() {
     fi
 }
 
-ensure_venv
-
 is_server_running() {
     lsof -i :8300 -sTCP:LISTEN >/dev/null 2>&1 || \
     ss -tlnp 2>/dev/null | grep -q ':8300 '
 }
+
+ensure_venv
 
 mkdir -p data
 LOG_FILE="data/server.log"
 
 if is_server_running; then
     echo "agentchattr is already running."
-    echo "Web UI: http://127.0.0.1:8300"
-    echo "Logs: $LOG_FILE"
-    exit 0
-fi
-
-if [ "$AUTO_APPROVE" -eq 1 ]; then
-    AGENTCHATTR_AUTO_APPROVE=1 nohup .venv/bin/python run.py >>"$LOG_FILE" 2>&1 &
 else
-    nohup .venv/bin/python run.py >>"$LOG_FILE" 2>&1 &
-fi
-SERVER_PID=$!
-echo "$SERVER_PID" > data/server.pid
-
-i=0
-while [ "$i" -lt 30 ]; do
-    if is_server_running; then
-        break
-    fi
-    sleep 0.5
-    i=$((i + 1))
-done
-
-if is_server_running; then
-    echo "agentchattr started in the background."
-    echo "Web UI: http://127.0.0.1:8300"
-    echo "Logs: $LOG_FILE"
-    echo "Agents now auto-start on first @mention and run in background tmux sessions."
     if [ "$AUTO_APPROVE" -eq 1 ]; then
-        echo "Auto-started Claude/Codex/Gemini instances will use their skip-permissions / bypass modes."
+        AGENTCHATTR_NETWORK_CONFIRM=YES AGENTCHATTR_AUTO_APPROVE=1 nohup .venv/bin/python run.py --allow-network >>"$LOG_FILE" 2>&1 &
+    else
+        AGENTCHATTR_NETWORK_CONFIRM=YES nohup .venv/bin/python run.py --allow-network >>"$LOG_FILE" 2>&1 &
     fi
-    exit 0
+    SERVER_PID=$!
+    echo "$SERVER_PID" > data/server.pid
+
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if is_server_running; then
+            break
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
 fi
 
-echo "Server did not come up. Check $LOG_FILE"
-exit 1
+echo "Logs: $LOG_FILE"
+if [ "$AUTO_APPROVE" -eq 1 ]; then
+    echo "Auto-started Claude/Codex/Gemini instances will use their skip-permissions / bypass modes."
+fi
+echo "WSL IPs:"
+hostname -I 2>/dev/null || true
+echo ""
+echo "Run this in Windows PowerShell as Administrator to refresh the LAN proxy:"
+echo "powershell.exe -ExecutionPolicy Bypass -File windows\\setup_wsl_lan.ps1"

@@ -24,6 +24,7 @@ from agents import AgentTrigger
 from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
+from server_launcher import ServerLauncher
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ agents: AgentTrigger | None = None
 registry: RuntimeRegistry | None = None
 session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
+launcher: ServerLauncher | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
 
@@ -229,7 +231,7 @@ def _install_security_middleware(token: str, cfg: dict):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config
+    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, launcher, config
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -295,6 +297,7 @@ def configure(cfg: dict, session_token: str = ""):
     )
     session_engine = SessionEngine(session_store, store, agents, registry)
     session_store.on_change(_on_session_change)
+    launcher = ServerLauncher(ROOT, cfg)
 
     # Bridge: when ANY message is added to store (including via MCP),
     # broadcast to all WebSocket clients
@@ -639,6 +642,19 @@ def _resolve_draft_lineage(text: str, channel: str) -> tuple[str, int]:
     return str(uuid.uuid4())[:8], 1
 
 
+def _maybe_autostart_agent(target: str) -> dict | None:
+    """Start a configured CLI agent wrapper in the background if needed."""
+    if not launcher or not registry:
+        return None
+    if registry.is_registered(target):
+        return None
+    if registry.family_instance_count(target) > 0:
+        return None
+    if not launcher.can_auto_spawn(target):
+        return None
+    return launcher.ensure_started(target)
+
+
 async def _handle_new_message(msg: dict):
     """Broadcast message to web clients + check for @mention triggers."""
     # For broadcast slash commands, suppress the raw message — only the expanded
@@ -833,10 +849,32 @@ async def _handle_new_message(msg: dict):
         # Session guard: suppress out-of-turn agent triggers
         if allowed_agent and target != allowed_agent:
             continue
-        if not mcp_bridge.is_online(target):
-            store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
-        if agents.is_available(target):
+        launch_result = None
+        if not agents.is_available(target):
+            launch_result = _maybe_autostart_agent(target)
+
+        queueable = agents.is_available(target) or bool(launch_result and launch_result.get("ok"))
+        if queueable:
             await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
+
+        if launch_result:
+            if launch_result.get("started"):
+                attach_cmd = launch_result.get("attach_command", "")
+                store.add(
+                    "system",
+                    f"Starting @{target} in the background. Message queued. Attach anytime with: {attach_cmd}",
+                    msg_type="system",
+                    channel=channel,
+                )
+            elif not launch_result.get("ok"):
+                store.add(
+                    "system",
+                    f"Could not auto-start @{target}: {launch_result.get('error', 'unknown error')}",
+                    msg_type="system",
+                    channel=channel,
+                )
+        elif not mcp_bridge.is_online(target) and agents.is_available(target):
+            store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
 
 
 # --- broadcasting ---

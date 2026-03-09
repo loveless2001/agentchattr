@@ -1,6 +1,7 @@
 """Entry point — starts MCP server (port 8200) + web UI (port 8300)."""
 
 import asyncio
+import os
 import secrets
 import sys
 import threading
@@ -117,10 +118,15 @@ def main():
             sys.exit(1)
         else:
             print()
-            try:
-                confirm = input("  Type YES to accept these risks and start: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                confirm = ""
+            confirm = os.environ.get("AGENTCHATTR_NETWORK_CONFIRM", "")
+            if confirm:
+                confirm = confirm.strip()
+                print("  Network confirmation provided via AGENTCHATTR_NETWORK_CONFIRM.")
+            else:
+                try:
+                    confirm = input("  Type YES to accept these risks and start: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    confirm = ""
             if confirm != "YES":
                 print("  Aborted.\n")
                 sys.exit(1)
@@ -137,4 +143,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

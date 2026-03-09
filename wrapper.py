@@ -508,6 +508,7 @@ def main():
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
+    parser.add_argument("--detached", action="store_true", help="Start the tmux-backed agent in the background")
     args, extra = parser.parse_known_args()
 
     agent = args.agent
@@ -828,6 +829,7 @@ def main():
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        run_kwargs["detached"] = args.detached
 
     try:
         run_agent(**run_kwargs)
