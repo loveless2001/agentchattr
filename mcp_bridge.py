@@ -342,8 +342,18 @@ def chat_propose_job(
     return f"Proposed job (msg_id={msg['id']}): {title}"
 
 
+def _resolve_upload_path(url: str, upload_dir: Path) -> str | None:
+    if not url:
+        return None
+    clean_url = url.split("?", 1)[0]
+    if clean_url.startswith("/uploads/"):
+        filename = clean_url.split("/")[-1]
+        return str(upload_dir / filename)
+    return None
+
+
 def _resolve_attachments(attachments: list[dict]) -> list[dict]:
-    """Add absolute file_path to attachments so agents can read images."""
+    """Add absolute file paths so agents can consume normalized attachments."""
     if not attachments:
         return attachments
     raw_dir = "./uploads"
@@ -353,10 +363,15 @@ def _resolve_attachments(attachments: list[dict]) -> list[dict]:
     resolved = []
     for att in attachments:
         a = dict(att)
-        url = a.get("url", "")
-        if url.startswith("/uploads/"):
-            filename = url.split("/")[-1]
-            a["file_path"] = str(upload_dir / filename)
+        file_path = _resolve_upload_path(a.get("url", ""), upload_dir)
+        if file_path:
+            a["file_path"] = file_path
+        original_path = _resolve_upload_path(a.get("download_url", ""), upload_dir)
+        if original_path:
+            a["original_file_path"] = original_path
+        markdown_path = _resolve_upload_path(a.get("markdown_url", ""), upload_dir)
+        if markdown_path:
+            a["markdown_file_path"] = markdown_path
         resolved.append(a)
     return resolved
 
@@ -902,4 +917,3 @@ def run_http_server():
 def run_sse_server():
     """Block — run SSE MCP in a background thread."""
     mcp_sse.run(transport="sse")
-

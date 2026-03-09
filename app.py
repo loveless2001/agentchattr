@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import mimetypes
 import re as _re
 import sys
 import threading
@@ -25,6 +26,7 @@ from registry import RuntimeRegistry
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 from server_launcher import ServerLauncher
+from attachment_processor import process_upload
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +165,36 @@ def _resolve_authenticated_agent(request: Request) -> dict | None:
     return registry.resolve_token(token)
 
 
+def _clean_attachments(raw_attachments) -> list[dict]:
+    if not isinstance(raw_attachments, list):
+        return []
+    allowed_keys = {
+        "id",
+        "name",
+        "url",
+        "kind",
+        "status",
+        "download_url",
+        "markdown_url",
+        "markdown_text",
+        "summary",
+        "content_type",
+        "size_bytes",
+        "truncated",
+    }
+    cleaned = []
+    for raw in raw_attachments:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("status") not in (None, "", "ready"):
+            continue
+        item = {k: raw[k] for k in allowed_keys if k in raw}
+        if item.get("url") or item.get("download_url") or item.get("markdown_url"):
+            item.setdefault("status", "ready")
+            cleaned.append(item)
+    return cleaned
+
+
 # --- Security middleware ---
 # Paths that don't require the session token (public assets).
 _PUBLIC_PREFIXES = ("/", "/static/")
@@ -182,7 +214,7 @@ def _install_security_middleware(token: str, cfg: dict):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
 
-            # Static assets, index page, and uploaded images are public.
+            # Static assets, index page, and uploaded attachments are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
             if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
@@ -1124,7 +1156,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if event.get("type") == "message":
                 text = event.get("text", "").strip()
-                attachments = event.get("attachments", [])
+                attachments = _clean_attachments(event.get("attachments", []))
                 sender = event.get("sender") or room_settings.get("username", "user")
                 channel = event.get("channel", "general")
 
@@ -1439,32 +1471,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # --- REST endpoints ---
 
-ALLOWED_UPLOAD_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB default
-
-
 @app.post("/api/upload")
 async def upload_image(file: UploadFile = File(...)):
     upload_dir = Path(config.get("images", {}).get("upload_dir", "./uploads"))
     upload_dir.mkdir(parents=True, exist_ok=True)
-
-    ext = Path(file.filename).suffix or ".png"
-    if ext.lower() not in ALLOWED_UPLOAD_EXTS:
-        return JSONResponse({"error": f"unsupported file type: {ext}"}, status_code=400)
 
     content = await file.read()
     max_bytes = config.get("images", {}).get("max_size_mb", 10) * 1024 * 1024
     if len(content) > max_bytes:
         return JSONResponse({"error": f"file too large (max {max_bytes // 1024 // 1024} MB)"}, status_code=400)
 
-    filename = f"{uuid.uuid4().hex[:8]}{ext}"
-    filepath = upload_dir / filename
-    filepath.write_bytes(content)
+    try:
+        attachment = process_upload(file.filename or "attachment", content, upload_dir)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    return JSONResponse({
-        "name": file.filename,
-        "url": f"/uploads/{filename}",
-    })
+    return JSONResponse(attachment)
 
 
 @app.get("/api/messages")
@@ -1839,7 +1861,7 @@ async def post_job_message(job_id: int, request: Request):
     body = await request.json()
     text = body.get("text", "").strip()
     sender = body.get("sender", "user")
-    attachments = body.get("attachments", [])
+    attachments = _clean_attachments(body.get("attachments", []))
     if not text and not attachments:
         return JSONResponse({"error": "text or attachments required"}, status_code=400)
     msg_type = body.get("type", "chat")
@@ -2220,7 +2242,7 @@ async def open_path(body: dict):
     return JSONResponse({"ok": True})
 
 
-# Serve uploaded images
+# Serve uploaded attachments
 # --- Sessions API ---
 
 @app.get("/api/sessions/templates")
@@ -2518,11 +2540,16 @@ async def version_check():
 
 
 @app.get("/uploads/{filename}")
-async def serve_upload(filename: str):
+async def serve_upload(filename: str, download: int = 0):
     upload_dir = Path(config.get("images", {}).get("upload_dir", "./uploads"))
     filepath = (upload_dir / filename).resolve()
     if not filepath.is_relative_to(upload_dir.resolve()):
         return JSONResponse({"error": "invalid path"}, status_code=400)
     if filepath.exists():
-        return FileResponse(filepath)
+        media_type, _ = mimetypes.guess_type(str(filepath))
+        headers = {}
+        inline_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+        if download or filepath.suffix.lower() not in inline_exts:
+            headers["Content-Disposition"] = f'attachment; filename="{filepath.name}"'
+        return FileResponse(filepath, media_type=media_type, headers=headers)
     return JSONResponse({"error": "not found"}, status_code=404)

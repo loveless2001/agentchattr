@@ -696,3 +696,20 @@
     margin-right: 6px;
     opacity: 0.7;
 }
+
+/* --- Mobile responsive --- */
+@media (max-width: 600px) {
+    .session-launcher-dialog {
+        width: calc(100vw - 24px);
+    }
+    .session-info {
+        gap: 6px;
+        font-size: 11px;
+    }
+    .session-info .session-waiting {
+        display: none;
+    }
+    .session-cast-dialog {
+        width: calc(100vw - 24px);
+    }
+}

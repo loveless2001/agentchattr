@@ -883,16 +883,39 @@ body.archive-no-select * {
 
 .job-attachments .attachment-preview {
     position: relative;
-    width: 60px;
-    height: 60px;
+    display: inline-flex;
 }
 
 .job-attachments .attachment-preview img {
-    width: 100%;
-    height: 100%;
+    width: 60px;
+    height: 60px;
     object-fit: cover;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
+}
+
+.job-attachments .attachment-preview .attachment-card {
+    min-width: 210px;
+    max-width: 280px;
+    padding-right: 28px;
+}
+
+.job-attachments .attachment-preview .remove-btn {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 18px;
+    height: 18px;
+    background: var(--error-color);
+    color: var(--text-on-accent);
+    border: none;
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
 }
 
 .job-msg-attachments {
@@ -1282,4 +1305,25 @@ body.archive-no-select * {
 
 .job-group.expanded .job-group-list {
     display: block;
+}
+
+/* --- Mobile responsive --- */
+@media (max-width: 600px) {
+    .jobs-conv-header {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .jobs-status-toggles {
+        width: 100%;
+        justify-content: flex-start;
+    }
+    .job-input-row textarea {
+        font-size: 14px;
+    }
+    .job-proposal-card {
+        padding: 10px 12px;
+    }
+    .job-proposal-actions {
+        flex-wrap: wrap;
+    }
 }

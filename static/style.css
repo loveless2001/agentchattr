@@ -2175,6 +2175,9 @@ main#timeline {
 
 .msg-attachments {
     margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .msg-attachments img {
@@ -2191,6 +2194,84 @@ main#timeline {
     border-color: var(--accent);
     transform: scale(1.02);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.attachment-card {
+    min-width: 180px;
+    max-width: min(420px, 100%);
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-lg);
+    padding: 10px 12px;
+}
+
+.attachment-card.file-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.attachment-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.attachment-badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+    border-radius: var(--radius-full);
+    padding: 3px 7px;
+}
+
+.attachment-info {
+    min-width: 0;
+}
+
+.attachment-name {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.attachment-subtitle {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 2px;
+}
+
+.attachment-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+}
+
+.attachment-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.attachment-link {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.attachment-link:hover {
+    text-decoration: underline;
 }
 
 /* --- Typing indicator --- */
@@ -2695,7 +2776,7 @@ footer {
 
 #attachments .attachment-preview {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
 }
 
 #attachments .attachment-preview img {
@@ -2704,6 +2785,12 @@ footer {
     object-fit: cover;
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
+}
+
+#attachments .attachment-preview .attachment-card {
+    min-width: 210px;
+    max-width: 280px;
+    padding-right: 28px;
 }
 
 #attachments .attachment-preview .remove-btn {
@@ -2732,6 +2819,31 @@ footer {
     display: flex;
     gap: 8px;
     align-items: flex-end;
+}
+
+.hidden-file-input {
+    display: none;
+}
+
+.attach-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
+    flex-shrink: 0;
+}
+
+.attach-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--bg-elevated);
 }
 
 .sender-label {
@@ -3380,4 +3492,314 @@ footer {
     background: var(--border-strong);
 }
 
+/* ==========================================================================
+   Mobile responsive — phones (max-width: 600px)
+   ========================================================================== */
 
+@media (max-width: 600px) {
+
+    /* --- Header --- */
+    header {
+        padding: 8px 10px;
+    }
+    .header-left {
+        gap: 6px;
+        min-width: 0;
+    }
+    header h1 {
+        font-size: 14px;
+    }
+    .discord-pill {
+        display: none;
+    }
+    .subtitle {
+        display: none;
+    }
+    .header-right {
+        gap: 6px;
+    }
+    #agent-status {
+        gap: 6px;
+        max-width: 40vw;
+    }
+    .status-pill {
+        padding: 3px 6px;
+        font-size: 11px;
+    }
+    .settings-btn {
+        padding: 4px 5px;
+    }
+
+    /* --- Settings bar --- */
+    #settings-bar {
+        gap: 8px;
+        padding: 8px 10px;
+    }
+    .settings-field input { width: 80px; }
+    .settings-field select { width: 100px; }
+    .settings-divider { display: none; }
+
+    /* --- Channel bar --- */
+    #channel-bar {
+        padding: 0 8px;
+        grid-template-columns: auto 1fr auto;
+    }
+    .channel-tab {
+        padding: 5px 8px;
+        font-size: 12px;
+    }
+    .channel-bar-right {
+        position: static;
+        flex-shrink: 0;
+    }
+    .channel-support {
+        display: none;
+    }
+    .channel-add {
+        margin-left: 4px;
+        opacity: 1;
+    }
+
+    /* --- Session bar --- */
+    #session-bar {
+        padding: 5px 10px;
+        flex-wrap: wrap;
+    }
+
+    /* --- Timeline / messages --- */
+    main#timeline {
+        padding: 8px;
+    }
+    .message {
+        gap: 6px;
+        padding: 2px 4px;
+    }
+    .chat-bubble {
+        max-width: 92%;
+        padding: 6px 10px;
+    }
+    .avatar-wrap {
+        width: 26px;
+    }
+    .avatar {
+        width: 26px;
+        height: 26px;
+    }
+    .avatar svg {
+        width: 14px;
+        height: 14px;
+    }
+    .msg-sender {
+        font-size: 12px;
+    }
+    .msg-time {
+        font-size: 10px;
+    }
+    .bubble-header {
+        gap: 6px;
+        margin-bottom: 4px;
+    }
+    .msg-text pre {
+        padding: 6px 8px;
+        font-size: 12px;
+    }
+    .msg-attachments img {
+        max-width: 200px;
+        max-height: 150px;
+    }
+
+    /* --- Proposal / summary cards --- */
+    .proposal-card,
+    .summary-card {
+        padding: 10px 12px;
+    }
+    .proposal-actions {
+        flex-wrap: wrap;
+    }
+
+    /* --- Side panels overlay on mobile --- */
+    #rules-panel,
+    #jobs-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 85vw;
+        max-width: none;
+        z-index: 50;
+        box-shadow: -4px 0 24px rgba(0, 0, 0, 0.6);
+    }
+    #rules-panel.hidden,
+    #jobs-panel.hidden {
+        margin-right: 0;
+        transform: translateX(100%);
+        opacity: 0;
+        pointer-events: none;
+    }
+    #rules-panel:not(.hidden),
+    #jobs-panel:not(.hidden) {
+        transform: translateX(0);
+        opacity: 1;
+    }
+
+    /* --- Pins panel --- */
+    #pins-panel {
+        max-height: 200px;
+    }
+
+    /* --- Footer / Input --- */
+    footer {
+        padding: 8px 10px;
+    }
+    #mention-toggles {
+        gap: 4px;
+        margin-bottom: 6px;
+    }
+    .mention-toggle {
+        padding: 3px 8px;
+        font-size: 11px;
+    }
+    #input-row {
+        gap: 6px;
+    }
+    .sender-label {
+        display: none;
+    }
+    #session-launch-btn {
+        display: none;
+    }
+    #input {
+        padding: 8px 10px;
+        font-size: 16px; /* >=16px prevents iOS auto-zoom on focus */
+        min-height: 38px;
+    }
+    .attach-btn {
+        width: 38px;
+        height: 38px;
+    }
+    #mic {
+        padding: 0 8px;
+        min-height: 38px;
+    }
+    #send {
+        padding: 0 14px;
+        min-height: 38px;
+        font-size: 13px;
+    }
+    .send-group #send {
+        padding-right: 10px;
+    }
+    .send-clock {
+        padding: 0 7px;
+    }
+    /* --- Attachment cards in messages --- */
+    .attachment-card {
+        min-width: 140px;
+    }
+    #attachments .attachment-preview .attachment-card {
+        min-width: 160px;
+        max-width: 220px;
+    }
+    .input-hint {
+        display: none;
+    }
+
+    /* --- Schedule popover --- */
+    .schedule-popover {
+        width: calc(100vw - 20px);
+        right: 10px;
+    }
+
+    /* --- Agent naming modal --- */
+    .agent-name-dialog {
+        min-width: 0;
+        width: calc(100vw - 32px);
+        max-width: 400px;
+        padding: 20px;
+    }
+
+    /* --- Image modal --- */
+    #image-modal img {
+        max-width: 95vw;
+        max-height: 80vh;
+    }
+    .modal-nav {
+        width: 40px;
+        height: 60px;
+        font-size: 32px;
+    }
+    .modal-prev { left: 4px; }
+    .modal-next { right: 4px; }
+
+    /* --- Scroll anchor --- */
+    #scroll-anchor {
+        bottom: 100px;
+        width: 36px;
+        height: 36px;
+    }
+
+    /* --- Dropzone --- */
+    .dropzone-inner {
+        padding: 16px 24px;
+        font-size: 15px;
+    }
+
+    /* --- Delete bar --- */
+    #delete-bar {
+        gap: 10px;
+        padding: 8px 10px;
+    }
+
+    /* --- Slash / mention menus --- */
+    #slash-menu {
+        left: 8px;
+        right: 8px;
+        max-height: 300px;
+    }
+    #mention-menu {
+        left: 8px;
+        right: 8px;
+    }
+
+    /* --- Schedules bar --- */
+    .schedules-bar-summary {
+        gap: 6px;
+        padding: 5px 8px;
+    }
+    .schedules-next {
+        display: none;
+    }
+
+    /* --- Role picker popup --- */
+    .bubble-role-picker {
+        max-width: 240px;
+    }
+}
+
+/* Small phones (max-width: 380px) */
+@media (max-width: 380px) {
+    header h1 {
+        display: none;
+    }
+    #agent-status {
+        max-width: 50vw;
+    }
+    .status-pill {
+        padding: 2px 5px;
+        font-size: 10px;
+    }
+    #mic {
+        display: none;
+    }
+    .attach-btn {
+        width: 34px;
+        height: 34px;
+    }
+    .attach-btn svg {
+        width: 14px;
+        height: 14px;
+    }
+    .chat-bubble {
+        max-width: 96%;
+    }
+}

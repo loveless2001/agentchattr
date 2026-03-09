@@ -114,9 +114,11 @@ class MessageStore:
                     if m["id"] == mid:
                         # Collect attachment files for cleanup
                         for att in m.get("attachments", []):
-                            url = att.get("url", "")
-                            if url.startswith("/uploads/"):
-                                deleted_attachments.append(url.split("/")[-1])
+                            for key in ("url", "download_url", "markdown_url"):
+                                url = att.get(key, "")
+                                clean = url.split("?", 1)[0]
+                                if clean.startswith("/uploads/"):
+                                    deleted_attachments.append(clean.split("/")[-1])
                         # Remove any associated todo
                         if mid in self._todos:
                             del self._todos[mid]

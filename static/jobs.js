@@ -201,6 +201,7 @@ function setupJobsGrip() {
 function setupJobsInput() {
     const input = document.getElementById('jobs-conv-input-text');
     if (!input) return;
+    const attachmentInput = document.getElementById('job-attachment-input');
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey && !jobMentionVisible) {
             e.preventDefault();
@@ -217,6 +218,15 @@ function setupJobsInput() {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
+    if (attachmentInput) {
+        attachmentInput.addEventListener('change', async (e) => {
+            const files = [...(e.target.files || [])];
+            for (const file of files) {
+                await uploadJobImage(file);
+            }
+            attachmentInput.value = '';
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,14 +1122,9 @@ function appendJobMessage(msg) {
             }</div>
         `;
     } else {
-        let attHtml = '';
-        if (msg.attachments && msg.attachments.length > 0) {
-            attHtml = '<div class="job-msg-attachments">';
-            for (const att of msg.attachments) {
-                attHtml += `<img src="${window.escapeHtml(att.url)}" alt="${window.escapeHtml(att.name || '')}" onclick="openImageModal('${window.escapeHtml(att.url)}')">`;
-            }
-            attHtml += '</div>';
-        }
+        const attHtml = window.renderAttachmentListHtml
+            ? window.renderAttachmentListHtml(msg.attachments, 'job-msg-attachments')
+            : '';
         div.innerHTML = `
             <div class="job-msg-header">
                 <span class="job-msg-sender" style="color: ${senderColor}">${window.escapeHtml(msg.sender)}</span>
@@ -1161,9 +1166,7 @@ async function sendJobMessage() {
             body: JSON.stringify({
                 text: outboundText,
                 sender: window.username,
-                attachments: jobPendingAttachments.map(a => ({
-                    path: a.path, name: a.name, url: a.url,
-                })),
+                attachments: jobPendingAttachments.map(a => window.serializeAttachment ? window.serializeAttachment(a) : a),
             }),
         });
         if (resp.ok) {
@@ -1177,13 +1180,16 @@ async function sendJobMessage() {
     }
 }
 
+function openJobAttachmentPicker() {
+    const input = document.getElementById('job-attachment-input');
+    if (input) input.click();
+}
+
 async function uploadJobImage(file) {
-    const form = new FormData();
-    form.append('file', file);
     try {
-        const resp = await fetch('/api/upload', { method: 'POST', headers: { 'X-Session-Token': window.SESSION_TOKEN }, body: form });
-        const data = await resp.json();
-        jobPendingAttachments.push({ path: data.path, name: data.name, url: data.url });
+        const data = window.uploadAttachment ? await window.uploadAttachment(file) : null;
+        if (!data) return;
+        jobPendingAttachments.push(data);
         renderJobAttachments();
     } catch (err) {
         console.error('Job upload failed:', err);
@@ -1195,10 +1201,9 @@ function renderJobAttachments() {
     if (!container) return;
     container.innerHTML = '';
     jobPendingAttachments.forEach((att, i) => {
-        const wrap = document.createElement('div');
-        wrap.className = 'attachment-preview';
-        wrap.innerHTML = `<img src="${att.url}" alt="${window.escapeHtml(att.name)}"><button class="remove-btn" onclick="removeJobAttachment(${i})">x</button>`;
-        container.appendChild(wrap);
+        if (window.renderAttachmentPreviewHtml) {
+            container.insertAdjacentHTML('beforeend', window.renderAttachmentPreviewHtml(att, i, 'removeJobAttachment'));
+        }
     });
 }
 
@@ -2094,6 +2099,7 @@ window.toggleJobStatus = toggleJobStatus;
 window.openJobConversation = openJobConversation;
 window.openJobFromBreadcrumb = openJobFromBreadcrumb;
 window.sendJobMessage = sendJobMessage;
+window.openJobAttachmentPicker = openJobAttachmentPicker;
 window.cycleJobReplyTarget = cycleJobReplyTarget;
 window.clearJobReplyTarget = clearJobReplyTarget;
 window.startDeleteJobMessage = startDeleteJobMessage;

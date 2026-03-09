@@ -231,6 +231,7 @@ function init() {
     fetchRoles();
     connectWebSocket();
     setupInput();
+    setupAttachmentPickers();
     setupDragDrop();
     setupPaste();
     setupScroll();
@@ -323,6 +324,113 @@ async function openPath(path) {
         console.error('Failed to open path:', err);
     }
 }
+
+const ATTACHMENT_FIELDS = [
+    'id',
+    'name',
+    'url',
+    'kind',
+    'status',
+    'download_url',
+    'markdown_url',
+    'markdown_text',
+    'summary',
+    'content_type',
+    'size_bytes',
+    'truncated',
+];
+
+function serializeAttachment(att) {
+    const out = {};
+    for (const key of ATTACHMENT_FIELDS) {
+        if (att[key] !== undefined && att[key] !== null && att[key] !== '') {
+            out[key] = att[key];
+        }
+    }
+    return out;
+}
+
+function isInlineImageAttachment(att) {
+    const kind = (att?.kind || '').toLowerCase();
+    const url = (att?.url || '').toLowerCase();
+    return kind === 'image' || (!kind && /\.(png|jpe?g|gif|webp|bmp)(\?|$)/.test(url));
+}
+
+function attachmentDisplayKind(att) {
+    if (isInlineImageAttachment(att)) return 'image';
+    if ((att?.kind || '').toLowerCase() === 'markdown') return 'doc';
+    if ((att?.content_type || '').includes('pdf')) return 'pdf';
+    if ((att?.name || '').toLowerCase().endsWith('.docx')) return 'docx';
+    return (att?.kind || 'file').toLowerCase();
+}
+
+function attachmentPrimaryUrl(att) {
+    return att.download_url || att.url || att.markdown_url || '#';
+}
+
+function attachmentSummary(att) {
+    if (att.summary) return att.summary;
+    if (att.markdown_text) {
+        return att.markdown_text.replace(/\[truncated for chat preview\]/g, '').trim();
+    }
+    return '';
+}
+
+function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '';
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderAttachmentHtml(att) {
+    const name = escapeHtml(att.name || 'attachment');
+    if (isInlineImageAttachment(att)) {
+        const url = escapeHtml(att.url || '');
+        return `<img src="${url}" alt="${name}" onclick="openImageModal('${url}')">`;
+    }
+
+    const badge = escapeHtml(attachmentDisplayKind(att));
+    const subtitleParts = [];
+    if (att.content_type) subtitleParts.push(att.content_type);
+    if (att.size_bytes) subtitleParts.push(formatBytes(att.size_bytes));
+    const summary = attachmentSummary(att);
+    const openUrl = escapeHtml(attachmentPrimaryUrl(att));
+    const markdownUrl = att.markdown_url ? escapeHtml(att.markdown_url) : '';
+    return `<div class="attachment-card file-card">
+        <div class="attachment-meta">
+            <span class="attachment-badge">${badge}</span>
+            <div class="attachment-info">
+                <div class="attachment-name" title="${name}">${name}</div>
+                ${subtitleParts.length ? `<div class="attachment-subtitle">${escapeHtml(subtitleParts.join(' · '))}</div>` : ''}
+            </div>
+        </div>
+        ${summary ? `<div class="attachment-summary">${escapeHtml(summary)}</div>` : ''}
+        <div class="attachment-actions">
+            <a class="attachment-link" href="${openUrl}" target="_blank" rel="noopener">open</a>
+            ${markdownUrl && markdownUrl !== openUrl ? `<a class="attachment-link" href="${markdownUrl}" target="_blank" rel="noopener">markdown</a>` : ''}
+        </div>
+    </div>`;
+}
+
+function renderAttachmentListHtml(attachments, className) {
+    if (!attachments || attachments.length === 0) return '';
+    return `<div class="${className}">${attachments.map(renderAttachmentHtml).join('')}</div>`;
+}
+
+function renderAttachmentPreviewHtml(att, index, removeFnName) {
+    const removeHtml = `<button class="remove-btn" onclick="${removeFnName}(${index})">x</button>`;
+    if (isInlineImageAttachment(att)) {
+        return `<div class="attachment-preview"><img src="${escapeHtml(att.url || '')}" alt="${escapeHtml(att.name || '')}">${removeHtml}</div>`;
+    }
+    return `<div class="attachment-preview">${renderAttachmentHtml(att)}${removeHtml}</div>`;
+}
+
+window.serializeAttachment = serializeAttachment;
+window.renderAttachmentListHtml = renderAttachmentListHtml;
+window.renderAttachmentPreviewHtml = renderAttachmentPreviewHtml;
+window.uploadAttachment = uploadAttachment;
 
 function addCodeCopyButtons(container) {
     const blocks = container.querySelectorAll('pre');
@@ -729,14 +837,7 @@ function appendMessage(msg) {
         const isSelf = msg.sender.toLowerCase() === username.toLowerCase();
         el.classList.add(isSelf ? 'self' : 'other');
 
-        let attachmentsHtml = '';
-        if (msg.attachments && msg.attachments.length > 0) {
-            attachmentsHtml = '<div class="msg-attachments">';
-            for (const att of msg.attachments) {
-                attachmentsHtml += `<img src="${escapeHtml(att.url)}" alt="${escapeHtml(att.name)}" onclick="openImageModal('${escapeHtml(att.url)}')">`;
-            }
-            attachmentsHtml += '</div>';
-        }
+        const attachmentsHtml = renderAttachmentListHtml(msg.attachments, 'msg-attachments');
 
         const todoStatus = todos[msg.id] || null;
 
@@ -1839,11 +1940,7 @@ function sendMessage() {
         text: text,
         sender: username,
         channel: activeChannel,
-        attachments: pendingAttachments.map(a => ({
-            path: a.path,
-            name: a.name,
-            url: a.url,
-        })),
+        attachments: pendingAttachments.map(serializeAttachment),
     };
     if (replyingTo) {
         payload.reply_to = replyingTo.id;
@@ -1861,7 +1958,24 @@ function sendMessage() {
     input.focus();
 }
 
-// --- Image paste/drop ---
+// --- Attachments ---
+
+function setupAttachmentPickers() {
+    const input = document.getElementById('attachment-input');
+    if (!input) return;
+    input.addEventListener('change', async (e) => {
+        const files = [...(e.target.files || [])];
+        for (const file of files) {
+            await addPendingAttachment(file);
+        }
+        input.value = '';
+    });
+}
+
+function openAttachmentPicker() {
+    const input = document.getElementById('attachment-input');
+    if (input) input.click();
+}
 
 function setupPaste() {
     document.addEventListener('paste', async (e) => {
@@ -1879,7 +1993,7 @@ function setupPaste() {
                 if (isJobFocused) {
                     await uploadJobImage(file);
                 } else {
-                    await uploadImage(file);
+                    await addPendingAttachment(file);
                 }
             }
         }
@@ -1919,32 +2033,48 @@ function setupDragDrop() {
         const files = e.dataTransfer?.files;
         if (!files) return;
 
+        const jobInput = document.getElementById('jobs-conv-input-text');
+        const isJobFocused = jobInput && document.activeElement === jobInput;
+
         for (const file of files) {
-            if (file.type.startsWith('image/')) {
-                await uploadImage(file);
+            if (isJobFocused) {
+                await uploadJobImage(file);
+            } else {
+                await addPendingAttachment(file);
             }
         }
     });
 }
 
-async function uploadImage(file) {
+async function uploadAttachment(file) {
     const form = new FormData();
     form.append('file', file);
 
     try {
         const resp = await fetch('/api/upload', { method: 'POST', headers: { 'X-Session-Token': SESSION_TOKEN }, body: form });
         const data = await resp.json();
-
-        pendingAttachments.push({
-            path: data.path,
-            name: data.name,
-            url: data.url,
-        });
-
-        renderAttachments();
+        if (!resp.ok) {
+            showSlashHint(data.error || 'Upload failed');
+            return null;
+        }
+        return data;
     } catch (err) {
         console.error('Upload failed:', err);
+        showSlashHint('Upload failed');
+        return null;
     }
+}
+
+async function addPendingAttachment(file) {
+    const attachment = await uploadAttachment(file);
+    if (!attachment) return;
+    pendingAttachments.push(attachment);
+    renderAttachments();
+    updateSendButton();
+}
+
+async function uploadImage(file) {
+    await addPendingAttachment(file);
 }
 
 function renderAttachments() {
@@ -1952,19 +2082,14 @@ function renderAttachments() {
     container.innerHTML = '';
 
     pendingAttachments.forEach((att, i) => {
-        const wrap = document.createElement('div');
-        wrap.className = 'attachment-preview';
-        wrap.innerHTML = `
-            <img src="${att.url}" alt="${escapeHtml(att.name)}">
-            <button class="remove-btn" onclick="removeAttachment(${i})">x</button>
-        `;
-        container.appendChild(wrap);
+        container.insertAdjacentHTML('beforeend', renderAttachmentPreviewHtml(att, i, 'removeAttachment'));
     });
 }
 
 function removeAttachment(index) {
     pendingAttachments.splice(index, 1);
     renderAttachments();
+    updateSendButton();
 }
 
 function clearAttachments() {
