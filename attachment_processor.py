@@ -10,17 +10,11 @@ from __future__ import annotations
 import io
 import mimetypes
 import re
-import tempfile
 import uuid
 import zipfile
 import zlib
 from pathlib import Path
 from xml.etree import ElementTree as ET
-
-try:
-    from docling.document_converter import DocumentConverter
-except ImportError:  # pragma: no cover - optional dependency
-    DocumentConverter = None
 
 try:
     import pymupdf
@@ -207,10 +201,6 @@ def docx_to_markdown(content: bytes) -> str:
 
 
 def pdf_to_markdown(content: bytes) -> str:
-    docling_text = pdf_to_markdown_docling(content)
-    if docling_text:
-        return docling_text
-
     pymupdf_text = pdf_to_markdown_pymupdf(content)
     if pymupdf_text:
         return pymupdf_text
@@ -238,29 +228,6 @@ def pdf_to_markdown(content: bytes) -> str:
     ascii_runs = re.findall(rb"[A-Za-z0-9][A-Za-z0-9 ,.;:?!()\/'\"_-]{8,}", content)
     fallback = "\n".join(run.decode("latin-1", errors="ignore") for run in ascii_runs[:200])
     return fallback.strip()
-
-
-def pdf_to_markdown_docling(content: bytes) -> str:
-    if DocumentConverter is None:
-        return ""
-
-    temp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(content)
-            temp_path = tmp.name
-        converter = DocumentConverter()
-        result = converter.convert(temp_path)
-        markdown = result.document.export_to_markdown()
-        return normalize_markdown(markdown)
-    except Exception:
-        return ""
-    finally:
-        if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 def pdf_to_markdown_pymupdf(content: bytes) -> str:
