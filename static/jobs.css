@@ -11,13 +11,13 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    margin-right: 0;
-    transition: margin-right 0.25s ease, opacity 0.2s ease;
+    transition: width 0.25s ease, min-width 0.25s ease, opacity 0.2s ease;
     position: relative;
 }
 
 #jobs-panel.hidden {
-    margin-right: calc(-1 * var(--panel-w));
+    width: 0;
+    min-width: 0;
     opacity: 0;
     pointer-events: none;
 }
@@ -64,12 +64,27 @@
 
 @media (prefers-reduced-motion: reduce) {
     @keyframes jobs-slide-in-left {
-        from { opacity: 0; transform: none; }
-        to { opacity: 1; transform: none; }
+        from {
+            opacity: 0;
+            transform: none;
+        }
+
+        to {
+            opacity: 1;
+            transform: none;
+        }
     }
+
     @keyframes jobs-slide-in-right {
-        from { opacity: 0; transform: none; }
-        to { opacity: 1; transform: none; }
+        from {
+            opacity: 0;
+            transform: none;
+        }
+
+        to {
+            opacity: 1;
+            transform: none;
+        }
     }
 }
 
@@ -98,7 +113,9 @@
     -moz-user-select: none;
 }
 
-.job-card:hover { background: var(--bg-msg-hover); }
+.job-card:hover {
+    background: var(--bg-msg-hover);
+}
 
 .jobs-group-items.job-reorder-active .job-card {
     transition: opacity var(--sb-motion-fast) ease, box-shadow 0.18s ease;
@@ -206,8 +223,15 @@
     flex-shrink: 0;
 }
 
-.job-card:hover .job-trash-btn { opacity: 0.6; }
-.job-trash-btn:hover { opacity: 1 !important; color: var(--danger); background: var(--danger-soft); }
+.job-card:hover .job-trash-btn {
+    opacity: 0.6;
+}
+
+.job-trash-btn:hover {
+    opacity: 1 !important;
+    color: var(--danger);
+    background: var(--danger-soft);
+}
 
 /* --- Archive drag-to-trash --- */
 
@@ -330,8 +354,15 @@ body.archive-no-select * {
 }
 
 @keyframes archive-trash-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-    50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.09); }
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.09);
+    }
 }
 
 .job-card-meta {
@@ -353,7 +384,8 @@ body.archive-no-select * {
     border: var(--sb-card-border-width) dashed var(--border);
     border-radius: var(--sb-card-radius);
     padding: var(--sb-padding);
-    margin: 4px 16px; /* Match sidebar padding */
+    margin: 4px 16px;
+    /* Match sidebar padding */
     cursor: pointer;
     transition: opacity var(--sb-motion-fast), border-color var(--sb-motion-fast), transform var(--sb-motion-fast);
     display: flex;
@@ -424,7 +456,10 @@ body.archive-no-select * {
     order: 1;
 }
 
-.jobs-back-btn:hover { color: var(--text); background: var(--white-06); }
+.jobs-back-btn:hover {
+    color: var(--text);
+    background: var(--white-06);
+}
 
 .jobs-conv-title {
     order: 3;
@@ -441,7 +476,10 @@ body.archive-no-select * {
     padding: 2px 4px;
     margin: 0;
 }
-.jobs-conv-title:hover { background: rgba(255,255,255,0.05); }
+
+.jobs-conv-title:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
 
 .job-title-input {
     width: 100%;
@@ -455,7 +493,10 @@ body.archive-no-select * {
     padding: 2px 4px;
     outline: none;
 }
-.job-title-input:focus { border-color: rgba(255,255,255,0.3); }
+
+.job-title-input:focus {
+    border-color: rgba(255, 255, 255, 0.3);
+}
 
 .jobs-status-toggles {
     display: flex;
@@ -519,9 +560,19 @@ body.archive-no-select * {
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
-.job-brief-card .job-brief-text p { margin: 0 0 4px; }
-.job-brief-card .job-brief-text p:last-child { margin-bottom: 0; }
-.job-brief-card .job-brief-text a { color: rgba(168, 85, 247, 0.9); }
+
+.job-brief-card .job-brief-text p {
+    margin: 0 0 4px;
+}
+
+.job-brief-card .job-brief-text p:last-child {
+    margin-bottom: 0;
+}
+
+.job-brief-card .job-brief-text a {
+    color: rgba(168, 85, 247, 0.9);
+}
+
 .job-brief-card .job-brief-text code {
     background: rgba(168, 85, 247, 0.1);
     padding: 1px 4px;
@@ -602,6 +653,7 @@ body.archive-no-select * {
         opacity: 0;
         transform: translateX(4px);
     }
+
     to {
         opacity: 1;
         transform: translateX(0);
@@ -879,7 +931,9 @@ body.archive-no-select * {
     flex-wrap: wrap;
 }
 
-.job-attachments:empty { display: none; }
+.job-attachments:empty {
+    display: none;
+}
 
 .job-attachments .attachment-preview {
     position: relative;
@@ -952,7 +1006,9 @@ body.archive-no-select * {
     z-index: 21;
 }
 
-#job-mention-menu.hidden { display: none; }
+#job-mention-menu.hidden {
+    display: none;
+}
 
 .job-input-row textarea {
     flex: 1;
@@ -979,7 +1035,7 @@ body.archive-no-select * {
     font-style: italic;
 }
 
-.job-input-row > button:last-child {
+.job-input-row>button:last-child {
     background: var(--accent);
     color: var(--text-on-accent);
     border: none;
@@ -993,7 +1049,9 @@ body.archive-no-select * {
     align-self: flex-end;
 }
 
-.job-input-row > button:last-child:hover { opacity: 0.85; }
+.job-input-row>button:last-child:hover {
+    opacity: 0.85;
+}
 
 /* --- Job create dialog (inline at top of list) --- */
 
@@ -1080,7 +1138,10 @@ body.archive-no-select * {
     white-space: nowrap;
 }
 
-.message:hover .convert-job-pill { opacity: 0.8; }
+.message:hover .convert-job-pill {
+    opacity: 0.8;
+}
+
 .convert-job-pill:hover {
     opacity: 1 !important;
     color: var(--bubble-color, var(--text));
@@ -1102,7 +1163,9 @@ body.archive-no-select * {
     animation: fadeIn 0.15s ease-out;
 }
 
-.convert-job-modal.hidden { display: none; }
+.convert-job-modal.hidden {
+    display: none;
+}
 
 .convert-job-dialog {
     background: var(--bg-header);
@@ -1141,8 +1204,13 @@ body.archive-no-select * {
     margin-bottom: 14px;
 }
 
-.convert-job-preview p { margin: 0 0 4px; }
-.convert-job-preview p:last-child { margin-bottom: 0; }
+.convert-job-preview p {
+    margin: 0 0 4px;
+}
+
+.convert-job-preview p:last-child {
+    margin-bottom: 0;
+}
 
 .convert-job-label {
     display: block;
@@ -1313,16 +1381,20 @@ body.archive-no-select * {
         flex-wrap: wrap;
         gap: 4px;
     }
+
     .jobs-status-toggles {
         width: 100%;
         justify-content: flex-start;
     }
+
     .job-input-row textarea {
         font-size: 14px;
     }
+
     .job-proposal-card {
         padding: 10px 12px;
     }
+
     .job-proposal-actions {
         flex-wrap: wrap;
     }
