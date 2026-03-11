@@ -508,6 +508,8 @@ def main():
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
+    parser.add_argument("--session-name", type=str, default=None,
+                        help="Override the tmux session name for this wrapper")
     parser.add_argument("--detached", action="store_true", help="Start the tmux-backed agent in the background")
     args, extra = parser.parse_known_args()
 
@@ -811,7 +813,7 @@ def main():
     else:
         from wrapper_unix import get_activity_checker, run_agent
 
-        unix_session_name = f"agentchattr-{assigned_name}"
+        unix_session_name = args.session_name or f"agentchattr-{assigned_name}"
         _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
 
     run_kwargs = dict(

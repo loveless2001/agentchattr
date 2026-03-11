@@ -125,7 +125,9 @@ class RuntimeRegistry:
                     del self._instances[base]
                     slot1.name = new_s1_name
                     base_cfg = self._bases[base]
-                    slot1.label = f"{base_cfg.get('label', base.capitalize())} 1"
+                    base_label = base_cfg.get("label", base.capitalize())
+                    if slot1.label == base_label:
+                        slot1.label = f"{base_label} 1"
                     # Color stays the same (slot 1 = base color)
                     self._instances[new_s1_name] = slot1
                     self._renames[base] = new_s1_name
@@ -181,7 +183,9 @@ class RuntimeRegistry:
                     remaining.name = base
                     remaining.slot = 1
                     base_cfg = self._bases.get(base, {})
-                    remaining.label = base_cfg.get("label", base.capitalize())
+                    base_label = base_cfg.get("label", base.capitalize())
+                    if remaining.label == f"{base_label} {r_slot}":
+                        remaining.label = base_label
                     remaining.color = _derive_color(base_cfg.get("color", "#888"), 1)
                     self._instances[base] = remaining
                     self._renames[old_name] = base
@@ -388,12 +392,29 @@ class RuntimeRegistry:
             return {n: _inst_dict(i) for n, i in self._instances.items()}
 
     def get_agent_config(self) -> dict[str, dict]:
-        """For WebSocket 'agents' message: {name: {color, label, base, state}}."""
+        """For WebSocket 'agents' message: {name: {color, label, base, state}}.
+
+        Deduplicates by base family — only one entry per base agent is returned,
+        using the base name as key and the base config's color/label.  If any
+        instance of the family is active, the entry shows as active.
+        """
         with self._lock:
-            return {
-                n: {"color": i.color, "label": i.label, "base": i.base, "state": i.state}
-                for n, i in self._instances.items()
-            }
+            result: dict[str, dict] = {}
+            for i in self._instances.values():
+                base = i.base
+                if base in result:
+                    # Promote to active if any instance is active
+                    if i.state == "active":
+                        result[base]["state"] = "active"
+                    continue
+                base_cfg = self._bases.get(base, {})
+                result[base] = {
+                    "color": base_cfg.get("color", i.color),
+                    "label": base_cfg.get("label", i.label),
+                    "base": base,
+                    "state": i.state,
+                }
+            return result
 
     def get_all_names(self) -> list[str]:
         with self._lock:

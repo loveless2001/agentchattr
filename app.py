@@ -1,6 +1,7 @@
 """agentchattr — FastAPI web UI + agent auto-trigger."""
 
 import asyncio
+import ipaddress
 import json
 import mimetypes
 import re as _re
@@ -9,6 +10,7 @@ import threading
 import uuid
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.requests import Request
@@ -27,6 +29,7 @@ from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 from server_launcher import ServerLauncher
 from attachment_processor import process_upload
+from channel_bindings import ChannelBindings
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ registry: RuntimeRegistry | None = None
 session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 launcher: ServerLauncher | None = None
+channel_bindings: ChannelBindings | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
 
@@ -205,10 +209,40 @@ def _install_security_middleware(token: str, cfg: dict):
     import app as _self
     _self.session_token = token
     port = cfg.get("server", {}).get("port", 8300)
-    allowed_origins = {
-        f"http://127.0.0.1:{port}",
-        f"http://localhost:{port}",
-    }
+    configured_host = str(cfg.get("server", {}).get("host", "127.0.0.1")).strip()
+
+    def _is_ip_literal(hostname: str) -> bool:
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            return False
+
+    def _origin_allowed(origin: str, request: Request) -> bool:
+        try:
+            parsed = urlsplit(origin)
+        except Exception:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        origin_host = parsed.hostname or ""
+        origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if origin_port != port:
+            return False
+
+        if origin_host in ("localhost", "127.0.0.1", "::1"):
+            return True
+
+        req_host = request.url.hostname or ""
+        if req_host == origin_host and _is_ip_literal(origin_host):
+            return True
+
+        if configured_host not in ("", "0.0.0.0", "::", "127.0.0.1", "localhost"):
+            if origin_host == configured_host:
+                return True
+
+        return False
 
     class SecurityMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -232,7 +266,7 @@ def _install_security_middleware(token: str, cfg: dict):
 
             # --- Origin check (blocks cross-origin / DNS-rebinding attacks) ---
             origin = request.headers.get("origin")
-            if origin and origin not in allowed_origins:
+            if origin and not _origin_allowed(origin, request):
                 return JSONResponse(
                     {"error": "forbidden: origin not allowed"},
                     status_code=403,
@@ -263,7 +297,8 @@ def _install_security_middleware(token: str, cfg: dict):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, launcher, config
+    global store, rules, summaries, jobs, schedules, router, agents, registry
+    global session_store, session_engine, launcher, channel_bindings, config
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -310,6 +345,7 @@ def configure(cfg: dict, session_token: str = ""):
     registry = RuntimeRegistry(data_dir=data_dir)
     registry.seed(cfg.get("agents", {}))
     registry.on_change(_on_registry_change)
+    channel_bindings = ChannelBindings(str(Path(data_dir) / "channel_agent_bindings.json"))
 
     # Router starts with base agent names (backward compat for direct MCP users),
     # registry.on_change updates it dynamically when instances register/deregister
@@ -674,17 +710,144 @@ def _resolve_draft_lineage(text: str, channel: str) -> tuple[str, int]:
     return str(uuid.uuid4())[:8], 1
 
 
-def _maybe_autostart_agent(target: str) -> dict | None:
-    """Start a configured CLI agent wrapper in the background if needed."""
+def _channel_agent_label(base: str, channel: str) -> str:
+    return config.get("agents", {}).get(base, {}).get("label", base.capitalize())
+
+
+def _channel_session_name(base: str, channel: str) -> str:
+    return f"agentchattr-{base}-{channel}"
+
+
+def _resolve_bound_channel_agent(base: str, channel: str) -> str | None:
+    if not registry or not channel_bindings:
+        return None
+    return channel_bindings.resolve(channel, base, registry)
+
+
+def _find_channel_instance(base: str, channel: str) -> str | None:
+    """Find the instance bound to this channel via channel_bindings."""
+    if not channel_bindings or not registry:
+        return None
+    return channel_bindings.resolve(channel, base, registry)
+
+
+async def _resolve_routing_target(target: str, channel: str, *, autostart: bool) -> dict | None:
+    if not registry:
+        return {"target": target, "requested": target, "launch_result": None}
+
+    is_base_family = target in config.get("agents", {})
+
+    # For base family names (e.g. "claude"), use channel-aware routing first
+    # so each channel gets its own agent instance instead of reusing another
+    # channel's instance.
+    if is_base_family:
+        bound = _resolve_bound_channel_agent(target, channel)
+        if bound:
+            return {"target": bound, "requested": target, "launch_result": None}
+
+        channel_inst = _find_channel_instance(target, channel)
+        if channel_inst:
+            return {"target": channel_inst, "requested": target, "launch_result": None}
+
+        if autostart:
+            launch_result = await asyncio.to_thread(_maybe_autostart_agent, target, channel)
+            if launch_result and launch_result.get("target"):
+                return {"target": launch_result["target"], "requested": target, "launch_result": launch_result}
+
+        # Fall back to any existing instance of this family
+        inst = registry.get_instance(target)
+        if inst:
+            return {"target": registry.resolve_name(target), "requested": target, "launch_result": None}
+
+        return None
+
+    # For specific instance names (e.g. "claude-2"), resolve directly
+    inst = registry.get_instance(target)
+    if inst:
+        return {"target": registry.resolve_name(target), "requested": target, "launch_result": None}
+
+    return {"target": target, "requested": target, "launch_result": None}
+
+
+async def _expand_routing_targets(raw_targets: list[str], channel: str, *, autostart: bool) -> list[dict]:
+    base_mentions = {
+        t for t in raw_targets
+        if t in config.get("agents", {})
+    }
+    expanded = []
+    seen = set()
+    for target in raw_targets:
+        inst = registry.get_instance(target) if registry else None
+        # Skip numbered/named instances when their base family is also mentioned
+        # (e.g. skip "claude-2" if "@claude" is in the message) to avoid
+        # double-triggering.  But never skip when target IS the base name itself.
+        if inst and inst.get("base") in base_mentions and target != inst.get("base"):
+            continue
+        resolved = await _resolve_routing_target(target, channel, autostart=autostart)
+        if not resolved:
+            continue
+        final_target = resolved["target"]
+        if final_target in seen:
+            continue
+        seen.add(final_target)
+        expanded.append(resolved)
+    return expanded
+
+
+def _maybe_autostart_agent(target: str, channel: str) -> dict | None:
+    """Start a channel-scoped CLI agent wrapper in the background if needed."""
     if not launcher or not registry:
         return None
-    if registry.is_registered(target):
-        return None
-    if registry.family_instance_count(target) > 0:
-        return None
+
+    bound = _resolve_bound_channel_agent(target, channel)
+    if bound:
+        return {
+            "ok": True,
+            "started": False,
+            "starting": False,
+            "target": bound,
+            "attach_command": f"tmux attach -t {_channel_session_name(target, channel)}",
+        }
+
     if not launcher.can_auto_spawn(target):
         return None
-    return launcher.ensure_started(target)
+
+    label = _channel_agent_label(target, channel)
+    session_name = _channel_session_name(target, channel)
+    launch_result = launcher.ensure_started(
+        target,
+        label=label,
+        session_name=session_name,
+    )
+    if not launch_result.get("ok"):
+        return launch_result
+
+    import time as _time
+
+    deadline = _time.time() + 6.0
+    instance_name = None
+    while _time.time() < deadline:
+        instance_name = _find_channel_instance(target, channel)
+        if instance_name:
+            break
+        _time.sleep(0.1)
+
+    if not instance_name:
+        return {
+            "ok": False,
+            "started": False,
+            "starting": bool(launch_result.get("starting")),
+            "attach_command": launch_result.get("attach_command", ""),
+            "error": f"timed out waiting for @{target} to register for #{channel}",
+        }
+
+    if channel_bindings:
+        channel_bindings.set(channel, target, instance_name)
+
+    launch_result = dict(launch_result)
+    launch_result["target"] = instance_name
+    launch_result["channel"] = channel
+    return launch_result
 
 
 async def _handle_new_message(msg: dict):
@@ -839,15 +1002,7 @@ async def _handle_new_message(msg: dict):
             )
 
     raw_targets = router.get_targets(sender, text, channel)
-    # Resolve base family names to actual registered instances
-    # e.g. 'claude' → 'claude-prime' when slot-1 was renamed
-    targets = []
-    for t in raw_targets:
-        if registry:
-            targets.extend(registry.resolve_to_instances(t))
-        else:
-            targets.append(t)
-    targets = list(dict.fromkeys(targets))  # dedupe, preserve order
+    targets = await _expand_routing_targets(raw_targets, channel, autostart=True)
 
     if router.is_paused(channel):
         # Only emit the loop guard notice once per pause
@@ -872,7 +1027,10 @@ async def _handle_new_message(msg: dict):
     allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
 
     import mcp_bridge
-    for target in targets:
+    for entry in targets:
+        target = entry["target"]
+        if sender_is_agent and registry and registry.resolve_name(sender) == target:
+            continue
         # Skip pending instances — they haven't been named/claimed yet
         if registry:
             inst = registry.get_instance(target)
@@ -881,10 +1039,7 @@ async def _handle_new_message(msg: dict):
         # Session guard: suppress out-of-turn agent triggers
         if allowed_agent and target != allowed_agent:
             continue
-        launch_result = None
-        if not agents.is_available(target):
-            launch_result = _maybe_autostart_agent(target)
-
+        launch_result = entry.get("launch_result")
         queueable = agents.is_available(target) or bool(launch_result and launch_result.get("ok"))
         if queueable:
             await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
@@ -892,9 +1047,11 @@ async def _handle_new_message(msg: dict):
         if launch_result:
             if launch_result.get("started"):
                 attach_cmd = launch_result.get("attach_command", "")
+                requested = entry.get("requested", target)
                 store.add(
                     "system",
-                    f"Starting @{target} in the background. Message queued. Attach anytime with: {attach_cmd}",
+                    f"Starting @{requested} in the background for #{channel}. "
+                    f"Message queued. Attach anytime with: {attach_cmd} (channel #{channel})",
                     msg_type="system",
                     channel=channel,
                 )
@@ -1433,6 +1590,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 idx = room_settings["channels"].index(old_name)
                 room_settings["channels"][idx] = new_name
                 store.rename_channel(old_name, new_name)
+                if channel_bindings:
+                    channel_bindings.rename_channel(old_name, new_name)
                 import mcp_bridge
                 mcp_bridge.migrate_cursors_rename(old_name, new_name)
                 _save_settings()
@@ -1456,9 +1615,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 if name not in room_settings["channels"]:
                     continue
                 room_settings["channels"].remove(name)
-                store.delete_channel(name)
-                import mcp_bridge
-                mcp_bridge.migrate_cursors_delete(name)
+                # Deleting a channel only removes it from the active channel list.
+                # Keep persisted history/cursors so recreating the same channel can
+                # surface prior context instead of permanently destroying it.
+                if channel_bindings:
+                    channel_bindings.delete_channel(name)
+                # Kill wrapper processes and tmux sessions for deleted channel
+                if launcher:
+                    for agent_name in config.get("agents", {}):
+                        session = _channel_session_name(agent_name, name)
+                        launcher.kill_session(session)
                 _save_settings()
                 await broadcast_settings()
 
@@ -1766,13 +1932,10 @@ async def trigger_agent_silent(request: Request):
                 f"mcp read #{channel} - you were mentioned, take appropriate action "
                 f"- conversion request: use chat_propose_job to propose a job from the referenced message."
             )
-    # Resolve to instances if multi-instance
-    targets = [agent_name]
-    if registry:
-        resolved = registry.resolve_to_instances(agent_name)
-        if resolved:
-            targets = resolved
-    for target in targets:
+    resolved_targets = await _expand_routing_targets([agent_name], channel, autostart=True)
+    targets = [entry["target"] for entry in resolved_targets]
+    for entry in resolved_targets:
+        target = entry["target"]
         if agents.is_available(target):
             await agents.trigger(target, message=message, channel=channel, prompt=custom_prompt)
     return {"ok": True, "triggered": targets}
@@ -1875,17 +2038,16 @@ async def post_job_message(job_id: int, request: Request):
     if job:
         channel = job.get("channel", "general")
         raw_targets = router.get_targets(sender, text, channel)
-        targets = []
-        for t in raw_targets:
-            if registry:
-                targets.extend(registry.resolve_to_instances(t))
-            else:
-                targets.append(t)
-        targets = list(dict.fromkeys(targets))
+        targets = await _expand_routing_targets(raw_targets, channel, autostart=True)
+        known_agents = set(registry.get_all_names()) if registry else set()
+        known_agents.update(config.get("agents", {}).keys())
 
         import mcp_bridge
         chat_msg = f"{sender}: {text}" if text else ""
-        for target in targets:
+        for entry in targets:
+            target = entry["target"]
+            if sender in known_agents and registry and registry.resolve_name(sender) == target:
+                continue
             if registry:
                 inst = registry.get_instance(target)
                 if inst and inst.get("state") == "pending":

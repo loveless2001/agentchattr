@@ -39,20 +39,84 @@ def _check_tmux():
     sys.exit(1)
 
 
+def _pane_content(tmux_session: str) -> str:
+    """Capture current tmux pane text."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", tmux_session, "-p"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _cli_is_ready(tmux_session: str) -> bool:
+    """Check if the CLI inside the tmux pane is ready for input.
+
+    Looks for common prompt indicators from supported CLIs
+    (Claude ❯, Codex ›, Gemini ❯/$, generic $) in recent lines.
+    """
+    content = _pane_content(tmux_session)
+    if not content.strip():
+        return False
+    # Check last few visible lines for a prompt character
+    for line in reversed(content.strip().splitlines()[-8:]):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Prompt chars at start of line indicate ready state
+        if stripped[0] in ("❯", "›", ">", "$", "%"):
+            return True
+    return False
+
+
 def inject(text: str, *, tmux_session: str):
-    """Send text + Enter to a tmux session via send-keys."""
-    # Use -l to send text literally (avoids misinterpreting as key names),
-    # then send Enter as a separate key press
+    """Send text + Enter to a tmux session via send-keys.
+
+    Waits for the CLI to show its prompt before sending, then verifies
+    Enter was processed — retries if the text is still in the input area.
+    """
+    # Wait for CLI to be ready (up to 30s for cold start / model loading)
+    for _ in range(60):
+        if _cli_is_ready(tmux_session):
+            break
+        time.sleep(0.5)
+
+    # Use -l to send text literally (avoids misinterpreting as key names)
     subprocess.run(
         ["tmux", "send-keys", "-t", tmux_session, "-l", text],
         capture_output=True,
     )
-    # Let TUI process the text before sending Enter (matches Windows wrapper)
-    time.sleep(0.3)
+
+    # Let TUI render the text before sending Enter
+    time.sleep(0.5)
     subprocess.run(
         ["tmux", "send-keys", "-t", tmux_session, "Enter"],
         capture_output=True,
     )
+
+    # Verify Enter was accepted — if injected text is still sitting on a
+    # prompt line, the CLI likely swallowed Enter during init; retry.
+    snippet = text[:50]
+    for _attempt in range(5):
+        time.sleep(1.0)
+        content = _pane_content(tmux_session)
+        if not content:
+            break
+        # Check last few lines for prompt + our text (still in input box)
+        still_pending = False
+        for line in reversed(content.strip().splitlines()[-6:]):
+            if snippet in line and any(c in line for c in "❯›>$%"):
+                still_pending = True
+                break
+        if not still_pending:
+            break
+        # Retry Enter
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "Enter"],
+            capture_output=True,
+        )
 
 
 def get_activity_checker(session_name, trigger_flag=None):

@@ -61,4 +61,4 @@ if ! is_server_running; then
     done
 fi
 
-.venv/bin/python wrapper.py codex -- --dangerously-bypass-approvals-and-sandbox
+.venv/bin/python wrapper.py codex --dangerously-bypass-approvals-and-sandbox

@@ -56,6 +56,12 @@ def main():
     mcp_bridge._ROLES_FILE = data_dir / "roles.json"
     mcp_bridge._load_roles()
 
+    # Clean up stale wrapper/tmux sessions for deleted channels
+    from app import launcher
+    if launcher:
+        active_channels = room_settings.get("channels", ["general"])
+        launcher.cleanup_stale_sessions(active_channels)
+
     # Start MCP servers in background threads
     http_port = config.get("mcp", {}).get("http_port", 8200)
     sse_port = config.get("mcp", {}).get("sse_port", 8201)

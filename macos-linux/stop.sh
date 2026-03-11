@@ -35,6 +35,11 @@ if [ "$SERVER_STOPPED" -eq 0 ]; then
     fi
 fi
 
+# Kill detached wrapper processes (they survive server stop and recreate tmux)
+for pid in $(pgrep -f 'wrapper\.py .* --detached' 2>/dev/null); do
+    kill "$pid" >/dev/null 2>&1 && echo "Stopped wrapper process $pid"
+done
+
 if command -v tmux >/dev/null 2>&1; then
     tmux ls 2>/dev/null | awk -F: '/^agentchattr-/{print $1}' | while IFS= read -r session; do
         if [ -n "$session" ]; then
