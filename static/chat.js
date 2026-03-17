@@ -2210,13 +2210,25 @@ function setupInput() {
     });
 
     // Auto-resize + slash menu + mention menu + send button state
-    input.addEventListener('input', () => {
+    function onInputChange() {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         updateSlashMenu(input.value);
         updateMentionMenu();
         updateSendButton();
-    });
+    }
+    input.addEventListener('input', onInputChange);
+    // Voice typing doesn't always fire 'input' — catch with additional events
+    input.addEventListener('compositionend', onInputChange);
+    input.addEventListener('change', onInputChange);
+    // Fallback poll for speech-to-text that bypasses all events
+    let _lastInputVal = '';
+    setInterval(() => {
+        if (input.value !== _lastInputVal) {
+            _lastInputVal = input.value;
+            updateSendButton();
+        }
+    }, 300);
     updateSendButton();
 }
 
