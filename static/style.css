@@ -3680,3 +3680,548 @@ footer {
     from { opacity: 0; transform: translateY(-4px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+/* --- Help Guide — row-based layout (anchored) + stacked modal (narrow) --- */
+.help-guide {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    pointer-events: none;
+    animation: hgFadeIn 0.25s ease;
+}
+@keyframes hgFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.hg-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.hg-svg-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 10002;
+    pointer-events: none;
+    overflow: visible;
+}
+.hg-svg-layer line {
+    stroke: rgba(124, 58, 237, 0.35);
+    stroke-width: 1;
+    fill: none;
+}
+.hg-svg-layer circle.hg-arrow-dot {
+    fill: rgba(124, 58, 237, 0.5);
+}
+
+/* Spotlight rings on anchor elements (anchored mode only) */
+.hg-spotlight {
+    position: fixed;
+    z-index: 10000;
+    border: 1.5px solid rgba(124, 58, 237, 0.5);
+    border-radius: 8px;
+    pointer-events: none;
+    animation: hgSpotPulse 2s ease-in-out infinite;
+}
+@keyframes hgSpotPulse {
+    0%, 100% { border-color: rgba(124, 58, 237, 0.5); }
+    50% { border-color: rgba(124, 58, 237, 0.8); }
+}
+
+/* --- Rows (anchored desktop mode) --- */
+.hg-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: flex;
+    gap: 10px;
+    padding: 0 8px;
+    pointer-events: none;
+    z-index: 10001;
+}
+.hg-row--top {
+    justify-content: flex-end;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+.hg-row--middle {
+    justify-content: flex-start;
+}
+.hg-row--bottom {
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap-reverse;
+}
+
+/* --- Card (flex child inside rows) --- */
+.hg-card {
+    max-width: 300px;
+    flex-shrink: 0;
+    pointer-events: auto;
+    background: rgba(15, 15, 23, 0.97);
+    border: 1px solid var(--border, #2a2a3e);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: hgCardIn 0.3s ease both;
+}
+.hg-card--light {
+    background: rgba(20, 20, 31, 0.95);
+}
+.hg-card--wide {
+    max-width: 320px;
+}
+@keyframes hgCardIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.hg-card:nth-child(1) { animation-delay: 0.00s; }
+.hg-card:nth-child(2) { animation-delay: 0.04s; }
+.hg-card:nth-child(3) { animation-delay: 0.08s; }
+.hg-card:nth-child(4) { animation-delay: 0.12s; }
+
+/* --- Stacked modal mode (narrow viewports < 900px) --- */
+.hg-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+.hg-content {
+    width: 100%;
+    max-width: 440px;
+    max-height: 85vh;
+    overflow-y: auto;
+    background: rgba(15, 15, 23, 0.98);
+    border: 1px solid var(--border, #2a2a3e);
+    border-radius: 14px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+    pointer-events: auto;
+    animation: hgCardIn 0.3s ease both;
+}
+.hg-content::-webkit-scrollbar { width: 4px; }
+.hg-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.hg-modal-header {
+    position: sticky;
+    top: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: rgba(15, 15, 23, 0.98);
+    border-bottom: 1px solid var(--border, #2a2a3e);
+    z-index: 1;
+}
+.hg-modal-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e0e0f0;
+}
+.hg-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-dim, #6a6a80);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+.hg-modal-close:hover { color: var(--text, #b8b8c8); }
+.hg-module {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.hg-module:last-child { border-bottom: none; }
+
+/* --- Module reusable styles --- */
+.hg-module-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e0e0f0;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.hg-loc {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-dim, #6a6a80);
+    opacity: 0.7;
+}
+.hg-module-desc {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text-dim, #6a6a80);
+    margin: 0 0 10px;
+}
+.hg-module-tip {
+    font-size: 11px;
+    line-height: 1.5;
+    color: rgba(106, 106, 128, 0.7);
+    margin: 8px 0 0;
+}
+.hg-module-tip strong { color: var(--text-dim); }
+
+/* --- Agent pill mockups --- */
+.hg-mock-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.hg-mock-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 99px;
+    background: var(--bg-subtle, rgba(255,255,255,0.04));
+    border: 1px solid transparent;
+    font-size: 11px;
+    font-weight: 500;
+    flex-shrink: 0;
+}
+.hg-mock-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.hg-mock-label {
+    font-size: 11px;
+    color: var(--text-dim, #6a6a80);
+    line-height: 1.4;
+}
+.hg-pill-working {
+    position: relative;
+    border-color: transparent;
+}
+.hg-pill-working::before {
+    content: '';
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: conic-gradient(from var(--border-angle, 0deg), #34d399, transparent 40%, transparent 60%, #34d399);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: hgSpin 2s linear infinite;
+}
+@property --border-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+@keyframes hgSpin { to { --border-angle: 360deg; } }
+
+.hg-pill-offline { opacity: 0.4; }
+
+/* --- Jobs mockups --- */
+.hg-mock-message {
+    position: relative;
+    display: flex;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-msg, #16161f);
+    border: 1px solid var(--border, #2a2a3e);
+    border-radius: 10px;
+    margin-bottom: 4px;
+}
+.hg-mock-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.hg-mock-msg-body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+.hg-mock-sender {
+    font-size: 11px;
+    font-weight: 600;
+}
+.hg-mock-text {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text, #b8b8c8);
+}
+.hg-mock-convert-pill {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    padding: 2px 8px;
+    background: rgba(124, 58, 237, 0.1);
+    border: 1px solid rgba(124, 58, 237, 0.5);
+    border-radius: 4px;
+    font-size: 10px;
+    color: rgba(167, 139, 250, 0.9);
+    font-weight: 500;
+    white-space: nowrap;
+    animation: hgPillPulse 2.5s ease-in-out infinite;
+}
+@keyframes hgPillPulse {
+    0%, 100% { border-color: rgba(124, 58, 237, 0.5); }
+    50% { border-color: rgba(124, 58, 237, 0.9); box-shadow: 0 0 8px rgba(124, 58, 237, 0.15); }
+}
+
+/* --- Panel mockups (Jobs, Rules) --- */
+.hg-mock-panel {
+    background: var(--bg, #0f0f17);
+    border: 1px solid var(--border, #2a2a3e);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-top: 8px;
+}
+.hg-mock-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text, #b8b8c8);
+    border-bottom: 1px solid var(--border-subtle);
+}
+.hg-mock-panel-add {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 14px;
+}
+.hg-mock-panel-badge {
+    background: var(--accent, #7c3aed);
+    color: #fff;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 99px;
+    font-weight: 700;
+}
+.hg-mock-panel-counter {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-dim);
+    opacity: 0.7;
+}
+
+/* Job card mock */
+.hg-mock-job-card {
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.hg-mock-job-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.hg-mock-job-title {
+    font-size: 12px;
+    color: var(--text);
+    flex: 1;
+}
+.hg-mock-job-toggles {
+    display: flex;
+    gap: 4px;
+}
+.hg-mock-toggle {
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--white-06);
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+.hg-mock-toggle.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+.hg-toggle-open.active {
+    background: var(--white-08);
+    color: var(--text);
+}
+.hg-toggle-done {
+    background: var(--success-soft, rgba(52,211,153,0.2));
+    color: var(--success, #34d399);
+}
+.hg-toggle-archived {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--danger, #ef4444);
+}
+
+/* Rule card mock */
+.hg-mock-rule-card {
+    padding: 8px 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.hg-mock-rule-card:last-child { border-bottom: none; }
+.hg-mock-rule-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 5px;
+}
+.hg-mock-rule-dot.active { background: var(--success, #34d399); }
+.hg-mock-rule-dot.draft { background: var(--text-dim, #6a6a80); }
+.hg-mock-rule-text {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.45;
+    flex: 1;
+}
+.hg-mock-rule-badge {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--warning, #fbbf24);
+    font-weight: 500;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+/* Session mockups */
+.hg-mock-sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+.hg-mock-session-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-input, #1a1a2e);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.hg-mock-session-icon {
+    color: var(--accent);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.hg-mock-session-info { display: flex; flex-direction: column; gap: 1px; }
+.hg-mock-session-name { font-size: 12px; font-weight: 600; color: var(--text); }
+.hg-mock-session-desc { font-size: 10px; color: var(--text-dim); }
+
+/* Custom session callout */
+.hg-custom-session {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: var(--accent-soft, rgba(124, 58, 237, 0.15));
+    border: 1px solid rgba(124, 58, 237, 0.25);
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+}
+.hg-custom-session strong { color: var(--text); }
+
+/* Schedule mockup */
+.hg-mock-schedule-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-input, #1a1a2e);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 8px;
+}
+.hg-mock-schedule-icon {
+    font-size: 14px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.hg-mock-schedule-info {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+}
+.hg-mock-sched-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--bg-msg, #16161f);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+.hg-mock-sched-entry .hg-sched-time {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 10px;
+    flex-shrink: 0;
+}
+.hg-mock-sched-entry .hg-sched-recur {
+    font-size: 9px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-weight: 500;
+    flex-shrink: 0;
+}
+
+/* Channel mockup */
+.hg-mock-channels {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+.hg-mock-ch {
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--bg-subtle);
+}
+.hg-mock-ch.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+.hg-mock-ch-add {
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-left: 2px;
+}
+
+/* Dismiss hint floating at bottom center (anchored mode) */
+.hg-dismiss-hint {
+    position: fixed;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10002;
+    font-size: 10px;
+    color: rgba(150, 150, 170, 0.4);
+    pointer-events: none;
+    animation: hgFadeIn 0.5s ease 0.4s both;
+}
+
+@keyframes helpPulse {
+    0%, 100% { box-shadow: none; }
+    50% { box-shadow: 0 0 8px 2px var(--accent); }
+}
+.help-pulse { animation: helpPulse 1s ease 3; }
