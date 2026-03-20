@@ -22,15 +22,37 @@ if %errorlevel% neq 0 (
 
 REM Start server if not already running, then wait for it
 netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1
+if %errorlevel% equ 0 (
+    netstat -ano | findstr :8200 | findstr LISTENING >nul 2>&1
+)
+if %errorlevel% equ 0 (
+    netstat -ano | findstr :8201 | findstr LISTENING >nul 2>&1
+)
 if %errorlevel% neq 0 (
-    start "agentchattr server" cmd /c "python run.py"
+    start "agentchattr server" cmd /c "set AGENTCHATTR_NETWORK_CONFIRM=YES&& python server_entry.py --allow-network"
+    set WAIT_COUNT=0
 )
 :wait_server
 netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1
 if %errorlevel% neq 0 (
-    timeout /t 1 /nobreak >nul
-    goto :wait_server
+    goto :wait_retry
 )
+netstat -ano | findstr :8200 | findstr LISTENING >nul 2>&1
+if %errorlevel% neq 0 goto :wait_retry
+netstat -ano | findstr :8201 | findstr LISTENING >nul 2>&1
+if %errorlevel% neq 0 goto :wait_retry
+goto :server_ready
+:wait_retry
+set /a WAIT_COUNT+=1
+if %WAIT_COUNT% geq 30 (
+    echo.
+    echo   Server did not become healthy within 30 seconds.
+    pause
+    exit /b 1
+)
+timeout /t 1 /nobreak >nul
+goto :wait_server
+:server_ready
 
 python wrapper.py claude
 if %errorlevel% neq 0 (

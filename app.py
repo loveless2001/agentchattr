@@ -724,13 +724,6 @@ def _resolve_bound_channel_agent(base: str, channel: str) -> str | None:
     return channel_bindings.resolve(channel, base, registry)
 
 
-def _find_channel_instance(base: str, channel: str) -> str | None:
-    """Find the instance bound to this channel via channel_bindings."""
-    if not channel_bindings or not registry:
-        return None
-    return channel_bindings.resolve(channel, base, registry)
-
-
 async def _resolve_routing_target(target: str, channel: str, *, autostart: bool) -> dict | None:
     if not registry:
         return {"target": target, "requested": target, "launch_result": None}
@@ -741,23 +734,29 @@ async def _resolve_routing_target(target: str, channel: str, *, autostart: bool)
     # so each channel gets its own agent instance instead of reusing another
     # channel's instance.
     if is_base_family:
+        # Check for channel-scoped instance first: {agent}-{channel}
+        channel_name = f"{target}-{channel}"
+        inst = registry.get_instance(channel_name)
+        if inst:
+            return {"target": channel_name, "requested": target, "launch_result": None}
+
+        # Check channel bindings (persisted from previous sessions)
         bound = _resolve_bound_channel_agent(target, channel)
         if bound:
             return {"target": bound, "requested": target, "launch_result": None}
 
-        channel_inst = _find_channel_instance(target, channel)
-        if channel_inst:
-            return {"target": channel_inst, "requested": target, "launch_result": None}
-
         if autostart:
-            launch_result = await asyncio.to_thread(_maybe_autostart_agent, target, channel)
-            if launch_result and launch_result.get("target"):
-                return {"target": launch_result["target"], "requested": target, "launch_result": launch_result}
+            result = _maybe_autostart_agent(target, channel)
+            if result and result.get("target"):
+                return {"target": result["target"], "requested": target, "launch_result": result}
 
-        # Fall back to any existing instance of this family
+        # Fallback only when channel-scoped autostart is unavailable.
+        # This preserves support for manual/base wrappers and non-auto-spawn
+        # providers, but does not take precedence over dedicated channel agents.
         inst = registry.get_instance(target)
         if inst:
-            return {"target": registry.resolve_name(target), "requested": target, "launch_result": None}
+            resolved_name = registry.resolve_name(target)
+            return {"target": resolved_name, "requested": target, "launch_result": None}
 
         return None
 
@@ -795,7 +794,12 @@ async def _expand_routing_targets(raw_targets: list[str], channel: str, *, autos
 
 
 def _maybe_autostart_agent(target: str, channel: str) -> dict | None:
-    """Start a channel-scoped CLI agent wrapper in the background if needed."""
+    """Start a channel-scoped CLI agent wrapper in the background.
+
+    Uses launcher.ensure_started() which handles cooldown, error capture,
+    and proper subprocess management.  Returns immediately with the
+    deterministic instance name — no polling for registration.
+    """
     if not launcher or not registry:
         return None
 
@@ -812,40 +816,22 @@ def _maybe_autostart_agent(target: str, channel: str) -> dict | None:
     if not launcher.can_auto_spawn(target):
         return None
 
+    expected_name = f"{target}-{channel}"
     label = _channel_agent_label(target, channel)
     session_name = _channel_session_name(target, channel)
+
+    # Bind the channel immediately — wrapper will register as expected_name
+    if channel_bindings:
+        channel_bindings.set(channel, target, expected_name)
+
     launch_result = launcher.ensure_started(
-        target,
-        label=label,
-        session_name=session_name,
+        target, label=label, session_name=session_name, channel=channel,
     )
     if not launch_result.get("ok"):
         return launch_result
 
-    import time as _time
-
-    deadline = _time.time() + 6.0
-    instance_name = None
-    while _time.time() < deadline:
-        instance_name = _find_channel_instance(target, channel)
-        if instance_name:
-            break
-        _time.sleep(0.1)
-
-    if not instance_name:
-        return {
-            "ok": False,
-            "started": False,
-            "starting": bool(launch_result.get("starting")),
-            "attach_command": launch_result.get("attach_command", ""),
-            "error": f"timed out waiting for @{target} to register for #{channel}",
-        }
-
-    if channel_bindings:
-        channel_bindings.set(channel, target, instance_name)
-
     launch_result = dict(launch_result)
-    launch_result["target"] = instance_name
+    launch_result["target"] = expected_name
     launch_result["channel"] = channel
     return launch_result
 
@@ -2187,9 +2173,10 @@ async def register_agent(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     base = body.get("base", "")
     label = body.get("label")
+    requested_name = body.get("requested_name")
     if not base:
         return JSONResponse({"error": "base is required"}, status_code=400)
-    result = registry.register(base, label)
+    result = registry.register(base, label, requested_name=requested_name)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)
     # Touch presence so the instance doesn't immediately time out

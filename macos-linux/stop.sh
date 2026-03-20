@@ -3,6 +3,7 @@
 cd "$(dirname "$0")/.."
 
 PID_FILE="data/server.pid"
+SERVER_SESSION="agentchattr-server"
 
 stop_server_pid() {
     pid="$1"
@@ -27,8 +28,24 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
+if command -v tmux >/dev/null 2>&1; then
+    if tmux has-session -t "$SERVER_SESSION" >/dev/null 2>&1; then
+        tmux kill-session -t "$SERVER_SESSION" >/dev/null 2>&1 || true
+        echo "Stopped tmux session $SERVER_SESSION"
+        SERVER_STOPPED=1
+    fi
+fi
+
 if [ "$SERVER_STOPPED" -eq 0 ]; then
     FALLBACK_PID="$(ps -ef | grep '[p]ython run.py' | awk 'NR==1 {print $2}')"
+    if stop_server_pid "$FALLBACK_PID"; then
+        echo "Stopped server process $FALLBACK_PID"
+        SERVER_STOPPED=1
+    fi
+fi
+
+if [ "$SERVER_STOPPED" -eq 0 ]; then
+    FALLBACK_PID="$(ps -ef | grep '[p]ython -c import os,sys; os.environ' | awk 'NR==1 {print $2}')"
     if stop_server_pid "$FALLBACK_PID"; then
         echo "Stopped server process $FALLBACK_PID"
         SERVER_STOPPED=1

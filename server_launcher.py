@@ -40,6 +40,7 @@ class ServerLauncher:
         *,
         label: str | None = None,
         session_name: str | None = None,
+        channel: str | None = None,
     ) -> dict:
         if not self.can_auto_spawn(agent_name):
             return {"ok": False, "error": f"auto-spawn is not supported for '{agent_name}'"}
@@ -75,6 +76,8 @@ class ServerLauncher:
             cmd.extend(["--label", label])
         if session_name:
             cmd.extend(["--session-name", session_name])
+        if channel:
+            cmd.extend(["--channel", channel])
         cmd.extend(self._auto_approve_args(agent_name))
         try:
             with open(log_path, "ab") as log_file:

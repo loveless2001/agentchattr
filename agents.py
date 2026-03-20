@@ -18,7 +18,7 @@ class AgentTrigger:
     def get_status(self) -> dict:
         from mcp_bridge import is_online, is_active, get_role
         instances = self._registry.get_all()
-        return {
+        status = {
             name: {
                 "available": is_online(name),
                 "busy": is_active(name),
@@ -28,6 +28,35 @@ class AgentTrigger:
             }
             for name, info in instances.items()
         }
+
+        # The UI renders one pill per base family, while runtime instances may be
+        # channel-scoped (for example, "codex-general"). Publish an aggregated
+        # family status as well so the existing pill design still reflects the
+        # live state of any instance in that family.
+        family_cfg = self._registry.get_agent_config()
+        for family_name, cfg in family_cfg.items():
+            family_status = status.setdefault(
+                family_name,
+                {
+                    "available": False,
+                    "busy": False,
+                    "label": cfg["label"],
+                    "color": cfg["color"],
+                    "role": get_role(family_name),
+                },
+            )
+            family_status["label"] = cfg["label"]
+            family_status["color"] = cfg["color"]
+
+        for name, info in instances.items():
+            family_name = info["base"]
+            family_status = status.get(family_name)
+            if not family_status:
+                continue
+            family_status["available"] = family_status["available"] or is_online(name)
+            family_status["busy"] = family_status["busy"] or is_active(name)
+
+        return status
 
     async def trigger(self, agent_name: str, message: str = "", channel: str = "general",
                       job_id: int | None = None, **kwargs):

@@ -302,15 +302,20 @@ def _build_provider_launch(
     )
 
     launch_args = [*mcp_args, *extra_args]
+    if agent == "codex":
+        # Codex can block at startup on an interactive update prompt, which
+        # prevents the wrapper from ever consuming queued mentions.
+        launch_args = ["-c", "check_for_update_on_startup=false", *launch_args]
     launch_env = dict(env)
 
     return launch_args, launch_env, inject_env, settings_path
 
 
-def _register_instance(server_port: int, base: str, label: str | None = None) -> dict:
+def _register_instance(server_port: int, base: str, label: str | None = None,
+                       requested_name: str | None = None) -> dict:
     import urllib.request
 
-    reg_body = json.dumps({"base": base, "label": label}).encode()
+    reg_body = json.dumps({"base": base, "label": label, "requested_name": requested_name}).encode()
     reg_req = urllib.request.Request(
         f"http://127.0.0.1:{server_port}/api/register",
         method="POST",
@@ -395,95 +400,97 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
                    refresh_interval: int = 10):
-    """Poll queue file and inject an MCP read task when triggered."""
+    """Poll queue file and inject MCP read tasks when triggered.
+
+    Each agent instance has one queue file: {name}_queue.jsonl.
+    Entries contain a 'channel' field — triggers are grouped by channel
+    so the wrapper injects one prompt per channel.
+    """
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
     while True:
         try:
-            _, queue_file = get_identity_fn()
-            if queue_file.exists() and queue_file.stat().st_size > 0:
-                with open(queue_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                queue_file.write_text("", "utf-8")
+            current_name, queue_file = get_identity_fn()
 
-                has_trigger = False
-                channel = "general"
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    has_trigger = True
-                    if isinstance(data, dict) and "channel" in data:
-                        channel = data["channel"]
+            if not queue_file.exists() or queue_file.stat().st_size == 0:
+                time.sleep(1)
+                continue
 
-                if has_trigger:
-                    # Signal activity BEFORE injecting — covers the thinking phase
-                    if trigger_flag is not None:
-                        trigger_flag[0] = True
-                    time.sleep(0.5)
+            with open(queue_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            queue_file.write_text("", "utf-8")
 
-                    # Check if this is a job/activity-scoped trigger
-                    job_id = None
-                    custom_prompt = ""
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict) and "job_id" in data:
-                                job_id = data["job_id"]
-                            if isinstance(data, dict):
-                                raw_prompt = data.get("prompt", "")
-                                if isinstance(raw_prompt, str) and raw_prompt.strip():
-                                    custom_prompt = raw_prompt.strip()
-                        except json.JSONDecodeError:
-                            pass
+            # Group entries by channel
+            channel_triggers: dict[str, dict] = {}
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry_data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ch = entry_data.get("channel", "general") if isinstance(entry_data, dict) else "general"
+                info = channel_triggers.setdefault(ch, {"job_id": None, "custom_prompt": ""})
+                if isinstance(entry_data, dict):
+                    if "job_id" in entry_data:
+                        info["job_id"] = entry_data["job_id"]
+                    raw_prompt = entry_data.get("prompt", "")
+                    if isinstance(raw_prompt, str) and raw_prompt.strip():
+                        info["custom_prompt"] = raw_prompt.strip()
 
-                    if custom_prompt:
-                        prompt = custom_prompt
-                    elif job_id:
-                        prompt = f"mcp read job_id={job_id} - you were mentioned in a job thread, take appropriate action"
-                    else:
-                        prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
+            if not channel_triggers:
+                time.sleep(1)
+                continue
 
-                    # Use current identity (may have changed via rename)
-                    current_name, _ = get_identity_fn()
-                    # Append role if set — check both current name and base name
-                    role = _fetch_role(server_port, current_name)
-                    if not role and current_name != agent_name:
-                        role = _fetch_role(server_port, agent_name)
-                    if role:
-                        prompt += f"\n\nROLE: {role}"
+            # Signal activity BEFORE injecting — covers the thinking phase
+            if trigger_flag is not None:
+                trigger_flag[0] = True
+            time.sleep(0.5)
 
-                    # Smart rules injection: first trigger, epoch change, or periodic refresh
-                    _token = get_token_fn() if get_token_fn else ""
-                    rules_data = _fetch_active_rules(server_port, _token)
-                    trigger_count += 1
-                    if rules_data:
-                        # Use server-side refresh_interval (live from settings UI)
-                        ri = rules_data.get("refresh_interval", refresh_interval)
-                        need_inject = (
-                            last_rules_epoch == 0
-                            or rules_data["epoch"] != last_rules_epoch
-                            or (ri > 0 and trigger_count % ri == 0)
-                        )
-                        if need_inject:
-                            if rules_data["rules"]:
-                                rules_text = "; ".join(rules_data["rules"])
-                                prompt += f"\n\nRULES:\n{rules_text}"
-                            last_rules_epoch = rules_data["epoch"]
-                            _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+            # Fetch role + rules once (shared across channels)
+            current_name, _ = get_identity_fn()
+            role = _fetch_role(server_port, current_name)
+            if not role and current_name != agent_name:
+                role = _fetch_role(server_port, agent_name)
 
-                    if first_mention and is_multi_instance:
-                        prompt += _IDENTITY_HINT
-                        first_mention = False
-                    inject_fn(prompt)
+            _token = get_token_fn() if get_token_fn else ""
+            rules_data = _fetch_active_rules(server_port, _token)
+            trigger_count += 1
+
+            rules_suffix = ""
+            if rules_data:
+                ri = rules_data.get("refresh_interval", refresh_interval)
+                need_inject = (
+                    last_rules_epoch == 0
+                    or rules_data["epoch"] != last_rules_epoch
+                    or (ri > 0 and trigger_count % ri == 0)
+                )
+                if need_inject:
+                    if rules_data["rules"]:
+                        rules_text = "; ".join(rules_data["rules"])
+                        rules_suffix = f"\n\nRULES:\n{rules_text}"
+                    last_rules_epoch = rules_data["epoch"]
+                    _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+
+            # Inject one prompt per channel
+            for channel, info in channel_triggers.items():
+                if info["custom_prompt"]:
+                    prompt = info["custom_prompt"]
+                elif info["job_id"]:
+                    prompt = f"mcp read job_id={info['job_id']} - you were mentioned in a job thread, take appropriate action"
+                else:
+                    prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
+
+                if role:
+                    prompt += f"\n\nROLE: {role}"
+                if rules_suffix:
+                    prompt += rules_suffix
+                if first_mention and is_multi_instance:
+                    prompt += _IDENTITY_HINT
+                    first_mention = False
+                inject_fn(prompt)
         except Exception:
             pass
 
@@ -510,6 +517,8 @@ def main():
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
     parser.add_argument("--session-name", type=str, default=None,
                         help="Override the tmux session name for this wrapper")
+    parser.add_argument("--channel", type=str, default=None,
+                        help="Channel this wrapper serves (registers as {agent}-{channel})")
     parser.add_argument("--detached", action="store_true", help="Start the tmux-backed agent in the background")
     args, extra = parser.parse_known_args()
 
@@ -522,8 +531,10 @@ def main():
     server_port = config.get("server", {}).get("port", 8300)
     mcp_cfg = config.get("mcp", {})
 
+    requested_name = f"{agent}-{args.channel}" if args.channel else None
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(server_port, agent, args.label,
+                                          requested_name=requested_name)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")

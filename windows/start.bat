@@ -9,7 +9,8 @@ if not exist ".venv" (
 )
 call .venv\Scripts\activate.bat
 
-python run.py
+set AGENTCHATTR_NETWORK_CONFIRM=YES
+python server_entry.py --allow-network
 echo.
 echo === Server exited with code %ERRORLEVEL% ===
 pause

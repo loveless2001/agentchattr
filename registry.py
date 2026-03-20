@@ -90,69 +90,93 @@ class RuntimeRegistry:
 
     # --- Registration ---
 
-    def register(self, base: str, label: str | None = None) -> dict | None:
+    def register(self, base: str, label: str | None = None,
+                 requested_name: str | None = None) -> dict | None:
         """Register a new instance of `base`. Returns slot info or None if unknown base.
 
-        When a 2nd instance registers, slot 1 is renamed from 'base' to 'base-1'
-        to prevent identity ambiguity. The rename info is returned as '_renamed_slot1'.
+        If `requested_name` is provided (e.g. "codex-plm"), use it directly
+        instead of slot-based naming.  This avoids rename cascades when
+        channel-scoped wrappers register alongside manually-started ones.
+
+        When a 2nd instance registers without requested_name, slot 1 is renamed
+        from 'base' to 'base-1' to prevent identity ambiguity.
         """
         with self._lock:
             if base not in self._bases:
                 return None
 
             self._expire_reserved()
-
-            # Find next free slot
-            taken = {i.slot for i in self._instances.values() if i.base == base}
-            reserved = set()
-            for rn in self._reserved:
-                rb, rs = self._parse_name(rn)
-                if rb == base:
-                    reserved.add(rs)
-
-            slot = 1
-            while slot in taken or slot in reserved:
-                slot += 1
-
-            # When a 2nd instance registers, rename slot-1 from "base" to "base-1"
-            # so that no instance shares a name with the base family.  This prevents
-            # a second instance from sending messages as "base" (identity theft).
-            renamed_slot1 = None
-            if slot >= 2 and base in self._instances:
-                slot1 = self._instances[base]
-                if slot1.base == base and slot1.slot == 1:
-                    new_s1_name = f"{base}-1"
-                    del self._instances[base]
-                    slot1.name = new_s1_name
-                    base_cfg = self._bases[base]
-                    base_label = base_cfg.get("label", base.capitalize())
-                    if slot1.label == base_label:
-                        slot1.label = f"{base_label} 1"
-                    # Color stays the same (slot 1 = base color)
-                    self._instances[new_s1_name] = slot1
-                    self._renames[base] = new_s1_name
-                    renamed_slot1 = {"old": base, "new": new_s1_name}
-
-            name = base if slot == 1 else f"{base}-{slot}"
             base_cfg = self._bases[base]
-            color = _derive_color(base_cfg.get("color", "#888"), slot)
 
-            if label:
-                lbl = label
-            elif slot == 1:
-                lbl = base_cfg.get("label", base.capitalize())
+            # --- Named registration (channel-scoped wrappers) ---
+            if requested_name:
+                # If already registered under this name, return existing
+                if requested_name in self._instances:
+                    inst = self._instances[requested_name]
+                    return _inst_dict(inst, include_token=True)
+                # Assign a slot for color derivation only
+                taken = {i.slot for i in self._instances.values() if i.base == base}
+                slot = 1
+                while slot in taken:
+                    slot += 1
+                lbl = label or base_cfg.get("label", base.capitalize())
+                color = _derive_color(base_cfg.get("color", "#888"), slot)
+                inst = Instance(name=requested_name, base=base, slot=slot,
+                                label=lbl, color=color, state="active")
+                self._instances[requested_name] = inst
+                result = _inst_dict(inst, include_token=True)
             else:
-                lbl = f"{base_cfg.get('label', base.capitalize())} {slot}"
+                # --- Slot-based registration (manual / non-channel wrappers) ---
 
-            # Fresh registrations are immediately authoritative. Identity
-            # recovery/reclaim still uses chat_claim, but normal startup should
-            # not block on a manual confirmation step.
-            state = "active"
-            inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state)
-            self._instances[name] = inst
-            result = _inst_dict(inst, include_token=True)
-            if renamed_slot1:
-                result["_renamed_slot1"] = renamed_slot1
+                # Find next free slot
+                taken = {i.slot for i in self._instances.values() if i.base == base}
+                reserved = set()
+                for rn in self._reserved:
+                    rb, rs = self._parse_name(rn)
+                    if rb == base:
+                        reserved.add(rs)
+
+                slot = 1
+                while slot in taken or slot in reserved:
+                    slot += 1
+
+                # When a 2nd instance registers, rename slot-1 from "base" to "base-1"
+                # so that no instance shares a name with the base family.  This prevents
+                # a second instance from sending messages as "base" (identity theft).
+                renamed_slot1 = None
+                if slot >= 2 and base in self._instances:
+                    slot1 = self._instances[base]
+                    if slot1.base == base and slot1.slot == 1:
+                        new_s1_name = f"{base}-1"
+                        del self._instances[base]
+                        slot1.name = new_s1_name
+                        base_label = base_cfg.get("label", base.capitalize())
+                        if slot1.label == base_label:
+                            slot1.label = f"{base_label} 1"
+                        # Color stays the same (slot 1 = base color)
+                        self._instances[new_s1_name] = slot1
+                        self._renames[base] = new_s1_name
+                        renamed_slot1 = {"old": base, "new": new_s1_name}
+
+                name = base if slot == 1 else f"{base}-{slot}"
+                color = _derive_color(base_cfg.get("color", "#888"), slot)
+
+                if label:
+                    lbl = label
+                elif slot == 1:
+                    lbl = base_cfg.get("label", base.capitalize())
+                else:
+                    lbl = f"{base_cfg.get('label', base.capitalize())} {slot}"
+
+                # Fresh registrations are immediately authoritative. Identity
+                # recovery/reclaim still uses chat_claim, but normal startup should
+                # not block on a manual confirmation step.
+                state = "active"
+                inst = Instance(name=name, base=base, slot=slot, label=lbl, color=color, state=state)
+                self._instances[name] = inst
+                result = _inst_dict(inst, include_token=True)
+                if renamed_slot1:
+                    result["_renamed_slot1"] = renamed_slot1
 
         self._notify()
         self._save_renames()

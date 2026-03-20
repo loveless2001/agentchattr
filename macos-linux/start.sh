@@ -47,15 +47,19 @@ ensure_venv() {
 
 ensure_venv
 
-is_server_running() {
-    lsof -i :8300 -sTCP:LISTEN >/dev/null 2>&1 || \
-    ss -tlnp 2>/dev/null | grep -q ':8300 '
+is_port_listening() {
+    lsof -i :"$1" -sTCP:LISTEN >/dev/null 2>&1 || \
+    ss -tlnp 2>/dev/null | grep -q ":$1 "
+}
+
+is_server_healthy() {
+    is_port_listening 8300 && is_port_listening 8200 && is_port_listening 8201
 }
 
 mkdir -p data
 LOG_FILE="data/server.log"
 
-if is_server_running; then
+if is_server_healthy; then
     echo "agentchattr is already running."
     echo "Web UI: http://127.0.0.1:8300"
     echo "Logs: $LOG_FILE"
@@ -63,23 +67,27 @@ if is_server_running; then
 fi
 
 if [ "$AUTO_APPROVE" -eq 1 ]; then
-    AGENTCHATTR_AUTO_APPROVE=1 nohup .venv/bin/python run.py >>"$LOG_FILE" 2>&1 &
+    nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
 else
-    nohup .venv/bin/python run.py >>"$LOG_FILE" 2>&1 &
+    nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
 fi
 SERVER_PID=$!
 echo "$SERVER_PID" > data/server.pid
 
 i=0
 while [ "$i" -lt 30 ]; do
-    if is_server_running; then
+    if is_server_healthy; then
         break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Server exited unexpectedly. Check $LOG_FILE"
+        exit 1
     fi
     sleep 0.5
     i=$((i + 1))
 done
 
-if is_server_running; then
+if is_server_healthy; then
     echo "agentchattr started in the background."
     echo "Web UI: http://127.0.0.1:8300"
     echo "Logs: $LOG_FILE"
