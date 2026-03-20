@@ -25,10 +25,55 @@ except ImportError:  # pragma: no cover - optional dependency
 INLINE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 IMAGE_EXTS = INLINE_IMAGE_EXTS | {".svg"}
 TEXT_EXTS = {".md", ".markdown", ".txt"}
+# Code and config file extensions — wrapped in fenced code blocks
+CODE_EXTS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".yaml", ".yml",
+    ".toml", ".csv", ".xml", ".html", ".css", ".sh", ".bash",
+    ".go", ".rs", ".java", ".rb", ".lua", ".c", ".cpp", ".h",
+    ".log", ".ini", ".cfg", ".sql", ".env", ".conf",
+}
+# Extension → markdown language hint for fenced code blocks
+_EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".jsx": "jsx", ".tsx": "tsx", ".json": "json", ".yaml": "yaml",
+    ".yml": "yaml", ".toml": "toml", ".csv": "csv", ".xml": "xml",
+    ".html": "html", ".css": "css", ".sh": "bash", ".bash": "bash",
+    ".go": "go", ".rs": "rust", ".java": "java", ".rb": "ruby",
+    ".lua": "lua", ".c": "c", ".cpp": "cpp", ".h": "c",
+    ".log": "log", ".ini": "ini", ".cfg": "ini", ".sql": "sql",
+    ".env": "bash", ".conf": "conf",
+}
+# Conservative MIME fallback for unknown extensions
+_ALLOWED_TEXT_MIMES = {"text/", "application/json", "application/xml",
+                       "application/x-yaml", "application/toml"}
 DOC_EXTS = {".pdf", ".docx"} | TEXT_EXTS
-ALLOWED_UPLOAD_EXTS = IMAGE_EXTS | DOC_EXTS
+ALLOWED_UPLOAD_EXTS = IMAGE_EXTS | DOC_EXTS | CODE_EXTS
 MAX_INLINE_TEXT_CHARS = 20_000
 MAX_SUMMARY_CHARS = 280
+
+
+def _is_text_mime(ext: str, content: bytes) -> bool:
+    """Check if an unknown extension has a text-like MIME type."""
+    mime, _ = mimetypes.guess_type(f"file{ext}")
+    if not mime:
+        return False
+    return any(mime.startswith(prefix) if prefix.endswith("/")
+               else mime == prefix for prefix in _ALLOWED_TEXT_MIMES)
+
+
+def _code_to_markdown(text: str, ext: str) -> str:
+    """Wrap code/config text in a fenced code block with language hint."""
+    lang = _EXT_TO_LANG.get(ext, "")
+    return f"```{lang}\n{text}\n```"
+
+
+def _run_security_scan(text: str, filename: str) -> dict | None:
+    """Run lightweight security scan on text content. Returns scan result or None."""
+    try:
+        from upload_security_scanner import scan_text
+        return scan_text(text, filename)
+    except ImportError:
+        return None
 
 
 def process_upload(filename: str, content: bytes, upload_dir: Path) -> dict:
@@ -39,7 +84,9 @@ def process_upload(filename: str, content: bytes, upload_dir: Path) -> dict:
     sniffed_ext = sniff_extension(content)
     if sniffed_ext:
         ext = sniffed_ext
-    if ext not in ALLOWED_UPLOAD_EXTS:
+
+    # Accept known extensions, or unknown extensions with text-like MIME
+    if ext not in ALLOWED_UPLOAD_EXTS and not _is_text_mime(ext, content):
         raise ValueError(f"unsupported file type: {ext or 'unknown'}")
 
     upload_id = uuid.uuid4().hex[:8]
@@ -72,17 +119,27 @@ def process_upload(filename: str, content: bytes, upload_dir: Path) -> dict:
             "summary": "SVG uploaded. Inline rendering is disabled for safety.",
         }
 
+    # Extract text content based on file type
     if ext in TEXT_EXTS:
-        markdown_text = decode_text_bytes(content).strip()
+        raw_text = decode_text_bytes(content).strip()
+        markdown_text = raw_text
+    elif ext in CODE_EXTS or _is_text_mime(ext, content):
+        raw_text = decode_text_bytes(content).strip()
+        markdown_text = _code_to_markdown(raw_text, ext)
     elif ext == ".docx":
-        markdown_text = docx_to_markdown(content).strip()
+        raw_text = docx_to_markdown(content).strip()
+        markdown_text = raw_text
     elif ext == ".pdf":
-        markdown_text = pdf_to_markdown(content).strip()
+        raw_text = pdf_to_markdown(content).strip()
+        markdown_text = raw_text
     else:
         raise ValueError(f"unsupported file type: {ext}")
 
     if not markdown_text:
         raise ValueError(f"could not extract text from {ext}")
+
+    # Run security scan on extracted text (advisory only)
+    scan_result = _run_security_scan(raw_text, original_name)
 
     normalized_text = normalize_markdown(markdown_text)
     truncated = len(normalized_text) > MAX_INLINE_TEXT_CHARS
@@ -93,7 +150,7 @@ def process_upload(filename: str, content: bytes, upload_dir: Path) -> dict:
     markdown_path = upload_dir / f"{upload_id}.md"
     markdown_path.write_text(normalized_text, "utf-8")
 
-    return {
+    result = {
         "id": upload_id,
         "name": original_name,
         "kind": "markdown",
@@ -107,6 +164,12 @@ def process_upload(filename: str, content: bytes, upload_dir: Path) -> dict:
         "summary": summarize_text(normalized_text),
         "truncated": truncated,
     }
+
+    # Attach security warnings if any found (advisory, never blocking)
+    if scan_result and not scan_result.get("safe", True):
+        result["security_warnings"] = scan_result["warnings"]
+
+    return result
 
 
 def guess_media_type(filename: str, ext: str) -> str:

@@ -1,10 +1,23 @@
-"""JSONL message persistence for the chat room with observer callbacks."""
+"""JSONL message persistence for the chat room with observer callbacks.
+
+Supports clear markers: /clear inserts an internal marker instead of deleting
+messages. Read methods return only messages after the latest marker per channel.
+When the JSONL file grows past a size threshold, older hidden messages are
+archived into numbered files.
+"""
 
 import json
+import logging
 import os
 import time
 import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# Archive when active JSONL exceeds this size (bytes). Default 5 MB.
+ARCHIVE_THRESHOLD_BYTES = 5 * 1024 * 1024
+CLEAR_MARKER_TYPE = "clear_marker"
 
 
 class MessageStore:
@@ -48,6 +61,24 @@ class MessageStore:
         """Register a callback(msg) called whenever a message is added."""
         self._callbacks.append(callback)
 
+    def _add_internal(self, msg: dict) -> dict:
+        """Append a message to storage without firing observer callbacks.
+
+        Used for internal bookkeeping entries (e.g. clear markers) that should
+        be persisted but never broadcast to clients or agents.
+        """
+        with self._lock:
+            msg["id"] = self._next_id
+            msg["timestamp"] = time.time()
+            msg["time"] = time.strftime("%H:%M:%S")
+            self._next_id += 1
+            self._messages.append(msg)
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        return msg
+
     def add(self, sender: str, text: str, msg_type: str = "chat",
             attachments: list | None = None, reply_to: int | None = None,
             channel: str = "general",
@@ -81,28 +112,83 @@ class MessageStore:
             except Exception:
                 pass
 
+        # Check if archival is needed after adding a message
+        self._maybe_archive()
+
         return msg
 
     def get_by_id(self, msg_id: int) -> dict | None:
+        """Lookup any message by ID (including hidden/pre-marker messages)."""
         with self._lock:
             for m in self._messages:
                 if m["id"] == msg_id:
                     return m
             return None
 
+    def _visible_messages(self, channel: str | None = None) -> list[dict]:
+        """Return messages visible after the latest clear marker per channel.
+
+        Must be called while holding self._lock. Clear markers themselves are
+        always excluded from the result.
+        """
+        msgs = self._messages
+        if channel:
+            msgs = [m for m in msgs if m.get("channel", "general") == channel]
+
+        # Find the latest clear marker for the target channel(s)
+        if channel:
+            # Single channel: find last marker in that channel
+            marker_idx = -1
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("type") == CLEAR_MARKER_TYPE:
+                    marker_idx = i
+                    break
+            if marker_idx >= 0:
+                msgs = msgs[marker_idx + 1:]
+        else:
+            # All channels: find latest marker per channel, keep only post-marker
+            latest_marker_id: dict[str, int] = {}
+            for m in msgs:
+                if m.get("type") == CLEAR_MARKER_TYPE:
+                    ch = m.get("channel", "general")
+                    latest_marker_id[ch] = m["id"]
+            if latest_marker_id:
+                msgs = [
+                    m for m in msgs
+                    if m.get("type") != CLEAR_MARKER_TYPE
+                    and m["id"] > latest_marker_id.get(
+                        m.get("channel", "general"), -1
+                    )
+                ]
+            else:
+                # No markers at all — just strip any marker type (defensive)
+                msgs = [m for m in msgs if m.get("type") != CLEAR_MARKER_TYPE]
+
+        # Final filter: never return clear markers to callers
+        return [m for m in msgs if m.get("type") != CLEAR_MARKER_TYPE]
+
     def get_recent(self, count: int = 50, channel: str | None = None) -> list[dict]:
+        """Get the most recent visible messages, respecting clear markers."""
         with self._lock:
-            msgs = self._messages
-            if channel:
-                msgs = [m for m in msgs if m.get("channel", "general") == channel]
-            return list(msgs[-count:])
+            return list(self._visible_messages(channel)[-count:])
 
     def get_since(self, since_id: int = 0, channel: str | None = None) -> list[dict]:
+        """Get visible messages after a given ID, respecting clear markers."""
         with self._lock:
-            msgs = [m for m in self._messages if m["id"] > since_id]
-            if channel:
-                msgs = [m for m in msgs if m.get("channel", "general") == channel]
-            return msgs
+            msgs = self._visible_messages(channel)
+            return [m for m in msgs if m["id"] > since_id]
+
+    def get_before(self, before_id: int, limit: int = 50,
+                   channel: str | None = None) -> list[dict]:
+        """Get older visible messages before a given ID (for backward pagination).
+
+        Returns up to `limit` visible messages whose ID is strictly less than
+        `before_id`, ordered oldest-to-newest (same as get_recent/get_since).
+        """
+        with self._lock:
+            msgs = self._visible_messages(channel)
+            older = [m for m in msgs if m["id"] < before_id]
+            return older[-limit:]
 
     def delete(self, msg_ids: list[int]) -> list[int]:
         """Delete messages by ID. Returns list of IDs actually deleted."""
@@ -170,24 +256,108 @@ class MessageStore:
             os.fsync(f.fileno())
 
     def clear(self, channel: str | None = None):
-        """Wipe messages and rewrite the log file.
-        If channel is given, only clear messages in that channel."""
+        """Insert a clear marker instead of deleting messages.
+
+        Messages before the marker become invisible to get_recent/get_since
+        but remain in the JSONL for archival. If channel is given, only that
+        channel is cleared. If None, markers are inserted for every channel
+        that has messages.
+        """
+        if channel:
+            self._add_internal({
+                "sender": "system",
+                "text": "",
+                "type": CLEAR_MARKER_TYPE,
+                "channel": channel,
+                "attachments": [],
+            })
+        else:
+            # Insert a marker for each channel that has messages
+            channels = set()
+            with self._lock:
+                for m in self._messages:
+                    channels.add(m.get("channel", "general"))
+            for ch in channels:
+                self._add_internal({
+                    "sender": "system",
+                    "text": "",
+                    "type": CLEAR_MARKER_TYPE,
+                    "channel": ch,
+                    "attachments": [],
+                })
+
+    def _maybe_archive(self):
+        """Archive hidden (pre-clear-marker) messages when file gets too large.
+
+        Moves messages that are invisible for their own channel into a numbered
+        archive file. The active file keeps only visible messages + markers.
+        """
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            return
+        if size < ARCHIVE_THRESHOLD_BYTES:
+            return
+
         with self._lock:
-            if channel:
-                removed_ids = {m["id"] for m in self._messages if m.get("channel", "general") == channel}
-                self._messages = [m for m in self._messages if m.get("channel", "general") != channel]
-                self._rewrite_jsonl()
-                # Clean up todos for cleared messages
-                for tid in list(self._todos.keys()):
-                    if tid in removed_ids:
-                        del self._todos[tid]
-                if removed_ids:
-                    self._save_todos()
-            else:
-                self._messages.clear()
-                self._path.write_text("")
-                self._todos.clear()
+            # Build per-channel latest clear marker ID
+            latest_marker_id: dict[str, int] = {}
+            for m in self._messages:
+                if m.get("type") == CLEAR_MARKER_TYPE:
+                    ch = m.get("channel", "general")
+                    latest_marker_id[ch] = m["id"]
+
+            if not latest_marker_id:
+                return  # No markers — nothing to archive
+
+            # Split: archivable = hidden for their own channel
+            keep: list[dict] = []
+            archive: list[dict] = []
+            for m in self._messages:
+                ch = m.get("channel", "general")
+                marker_id = latest_marker_id.get(ch, -1)
+                if m["id"] <= marker_id and m.get("type") != CLEAR_MARKER_TYPE:
+                    archive.append(m)
+                elif m.get("type") == CLEAR_MARKER_TYPE and m["id"] <= marker_id and m["id"] != marker_id:
+                    # Old markers (not the latest per channel) can be archived
+                    archive.append(m)
+                else:
+                    keep.append(m)
+
+            if not archive:
+                return
+
+            # Find next archive number
+            stem = self._path.stem
+            suffix = self._path.suffix
+            parent = self._path.parent
+            n = 1
+            while (parent / f"{stem}.{n}{suffix}").exists():
+                n += 1
+            archive_path = parent / f"{stem}.{n}{suffix}"
+
+            # Write archive file
+            with open(archive_path, "w", encoding="utf-8") as f:
+                for m in archive:
+                    f.write(json.dumps(m, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Update active file with only kept messages
+            self._messages = keep
+            self._rewrite_jsonl()
+
+            # Clean up todos that referenced archived messages
+            archived_ids = {m["id"] for m in archive}
+            changed = False
+            for tid in list(self._todos.keys()):
+                if tid in archived_ids:
+                    del self._todos[tid]
+                    changed = True
+            if changed:
                 self._save_todos()
+
+            log.info("Archived %d messages to %s", len(archive), archive_path)
 
     def rename_channel(self, old_name: str, new_name: str):
         """Migrate all messages from old_name to new_name."""
