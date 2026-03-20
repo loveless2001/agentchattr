@@ -24,6 +24,9 @@ let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
 let agentHats = {};  // { agent_name: svg_string }
 let schedulesList = [];  // array of schedule objects from server
+let loadedChannelMessages = {};  // { channelName: [msg, ...] } currently loaded in the client
+let channelHistoryState = {};  // { channelName: { oldestLoadedId, hasMore, loading } }
+const DEFAULT_HISTORY_PAGE_SIZE = 50;
 
 // Expose globals that extracted modules (sessions.js, jobs.js) read via window.*
 // Using defineProperty so live values are always returned.
@@ -338,6 +341,7 @@ const ATTACHMENT_FIELDS = [
     'content_type',
     'size_bytes',
     'truncated',
+    'security_warnings',
 ];
 
 function serializeAttachment(att) {
@@ -456,6 +460,174 @@ function addCodeCopyButtons(container) {
     }
 }
 
+function ensureLoadedChannel(channel) {
+    const ch = channel || 'general';
+    if (!loadedChannelMessages[ch]) loadedChannelMessages[ch] = [];
+    return loadedChannelMessages[ch];
+}
+
+function ensureChannelHistoryState(channel) {
+    const ch = channel || 'general';
+    if (!channelHistoryState[ch]) {
+        channelHistoryState[ch] = {
+            oldestLoadedId: null,
+            hasMore: false,
+            loading: false,
+        };
+    }
+    return channelHistoryState[ch];
+}
+
+function getHistoryPageSize() {
+    const raw = parseInt(document.getElementById('setting-history')?.value || '', 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_HISTORY_PAGE_SIZE;
+}
+
+function syncOldestLoadedId(channel) {
+    const messages = ensureLoadedChannel(channel);
+    const state = ensureChannelHistoryState(channel);
+    state.oldestLoadedId = messages.length ? messages[0].id : null;
+}
+
+function upsertLoadedMessage(msg) {
+    const channel = msg.channel || 'general';
+    const messages = ensureLoadedChannel(channel);
+    const idx = messages.findIndex(existing => existing.id === msg.id);
+    if (idx >= 0) {
+        const same = JSON.stringify(messages[idx]) === JSON.stringify(msg);
+        if (same) return false;
+        messages[idx] = msg;
+        syncOldestLoadedId(channel);
+        return true;
+    }
+
+    if (!messages.length || msg.id > messages[messages.length - 1].id) {
+        messages.push(msg);
+    } else if (msg.id < messages[0].id) {
+        messages.unshift(msg);
+    } else {
+        let insertAt = messages.findIndex(existing => existing.id > msg.id);
+        if (insertAt === -1) insertAt = messages.length;
+        messages.splice(insertAt, 0, msg);
+    }
+    syncOldestLoadedId(channel);
+    return true;
+}
+
+function removeLoadedMessages(ids) {
+    const affected = new Set();
+    for (const [channel, messages] of Object.entries(loadedChannelMessages)) {
+        const remaining = messages.filter(msg => !ids.includes(msg.id));
+        if (remaining.length !== messages.length) {
+            loadedChannelMessages[channel] = remaining;
+            syncOldestLoadedId(channel);
+            affected.add(channel);
+        }
+    }
+    return affected;
+}
+
+function resetLoadedChannel(channel) {
+    loadedChannelMessages[channel] = [];
+    channelHistoryState[channel] = {
+        oldestLoadedId: null,
+        hasMore: false,
+        loading: false,
+    };
+}
+
+function firstVisibleMessageId(channel = activeChannel) {
+    const container = document.getElementById('messages');
+    if (!container) return null;
+    for (const el of container.children) {
+        if (el.style.display === 'none' || !el.dataset.id) continue;
+        if ((el.dataset.channel || 'general') === channel) {
+            return Number(el.dataset.id);
+        }
+    }
+    return null;
+}
+
+function rebuildChannelMessages(channel, preserveTopId = null) {
+    const container = document.getElementById('messages');
+    if (!container) return;
+
+    for (const el of [...container.children]) {
+        if ((el.dataset.channel || 'general') === channel) {
+            el.remove();
+        }
+    }
+    delete lastMessageDates[channel];
+
+    const messages = ensureLoadedChannel(channel);
+    for (const msg of messages) {
+        appendMessage(msg, { skipState: true });
+    }
+
+    filterMessagesByChannel();
+    if (preserveTopId != null) {
+        const anchor = document.querySelector(`.message[data-id="${preserveTopId}"]`);
+        if (anchor) anchor.scrollIntoView({ block: 'start' });
+    }
+}
+
+function renderLoadMoreButton() {
+    const row = document.getElementById('load-more-row');
+    const btn = document.getElementById('load-more-btn');
+    if (!row || !btn) return;
+
+    const state = ensureChannelHistoryState(activeChannel);
+    const show = Boolean(state.hasMore && state.oldestLoadedId);
+    row.classList.toggle('hidden', !show);
+    if (!show) {
+        btn.disabled = false;
+        btn.textContent = 'Load more';
+        return;
+    }
+
+    btn.disabled = !!state.loading;
+    btn.textContent = state.loading ? `Loading #${activeChannel}...` : `Load more from #${activeChannel}`;
+}
+window.renderLoadMoreButton = renderLoadMoreButton;
+
+async function loadMoreMessages() {
+    const channel = activeChannel;
+    const state = ensureChannelHistoryState(channel);
+    if (state.loading || !state.hasMore || !state.oldestLoadedId) return;
+
+    state.loading = true;
+    renderLoadMoreButton();
+    const preserveTopId = firstVisibleMessageId(channel);
+
+    try {
+        const params = new URLSearchParams({
+            channel,
+            before_id: String(state.oldestLoadedId),
+            limit: String(getHistoryPageSize()),
+        });
+        const resp = await fetch(`/api/messages/page?${params.toString()}`, {
+            headers: { 'X-Session-Token': SESSION_TOKEN },
+        });
+        if (!resp.ok) throw new Error(`history page failed: ${resp.status}`);
+
+        const data = await resp.json();
+        const messages = Array.isArray(data.messages) ? data.messages : [];
+        for (const msg of messages) {
+            upsertLoadedMessage(msg);
+        }
+        syncOldestLoadedId(channel);
+        state.hasMore = !!data.has_more;
+        rebuildChannelMessages(channel, preserveTopId);
+    } catch (err) {
+        console.error('Failed to load older messages:', err);
+        showSlashHint('Failed to load older messages');
+    } finally {
+        state.loading = false;
+        renderLoadMoreButton();
+    }
+}
+window.loadMoreMessages = loadMoreMessages;
+
 // --- WebSocket ---
 
 function connectWebSocket() {
@@ -567,6 +739,12 @@ function connectWebSocket() {
                     scrollToBottom();
                 });
             }
+        } else if (event.type === 'history_state') {
+            const data = event.data || {};
+            const state = ensureChannelHistoryState(data.channel || 'general');
+            state.oldestLoadedId = data.oldest_loaded_id ?? state.oldestLoadedId;
+            state.hasMore = !!data.has_more;
+            renderLoadMoreButton();
         } else if (event.type === 'typing') {
             updateTyping(event.agent, event.active);
         } else if (event.type === 'settings') {
@@ -615,10 +793,19 @@ function connectWebSocket() {
                 localStorage.setItem('agentchattr-channel', event.new_name);
                 Store.set('activeChannel', event.new_name);
             }
+            if (loadedChannelMessages[event.old_name]) {
+                loadedChannelMessages[event.new_name] = loadedChannelMessages[event.old_name];
+                delete loadedChannelMessages[event.old_name];
+            }
+            if (channelHistoryState[event.old_name]) {
+                channelHistoryState[event.new_name] = channelHistoryState[event.old_name];
+                delete channelHistoryState[event.old_name];
+            }
         } else if (event.type === 'edit') {
             // A message was edited/demoted — re-render it in place
             const updatedMsg = event.message;
             if (updatedMsg && updatedMsg.id != null) {
+                upsertLoadedMessage(updatedMsg);
                 const el = document.querySelector(`.message[data-id="${updatedMsg.id}"]`);
                 if (el) {
                     // Insert a fresh message after the old one, then remove the old
@@ -627,7 +814,7 @@ function connectWebSocket() {
                     el.remove();
                     // Temporarily hijack container to insert at the right spot
                     const container = document.getElementById('messages');
-                    appendMessage(updatedMsg);
+                    appendMessage(updatedMsg, { skipState: true });
                     // Move the newly appended message to where the old one was
                     const newEl = container.lastElementChild;
                     if (newEl && newEl.dataset.id == updatedMsg.id) {
@@ -647,12 +834,13 @@ function connectWebSocket() {
                 const container = document.getElementById('messages');
                 const toRemove = [];
                 for (const el of container.children) {
-                    if (el.dataset.id && (el.dataset.channel || 'general') === clearChannel) {
+                    if ((el.dataset.channel || 'general') === clearChannel) {
                         toRemove.push(el);
                     }
                 }
                 toRemove.forEach(el => el.remove());
-                // Clean up orphaned date dividers and reset tracking
+                resetLoadedChannel(clearChannel);
+                // Clean up channel tracking
                 delete lastMessageDates[clearChannel];
                 filterMessagesByChannel();
             } else {
@@ -660,7 +848,10 @@ function connectWebSocket() {
                 document.getElementById('messages').innerHTML = '';
                 lastMessageDate = null;
                 lastMessageDates = {};
+                loadedChannelMessages = {};
+                channelHistoryState = {};
             }
+            renderLoadMoreButton();
             requestAnimationFrame(() => {
                 const _clearDbgAfter = _clearDbgList ? _clearDbgList.children.length : -1;
                 console.log('CLEAR_DEBUG after clear (next frame), jobs-panel-children=' + _clearDbgAfter);
@@ -735,7 +926,11 @@ function maybeInsertDateDivider(container, msg) {
 
 // --- Messages ---
 
-function appendMessage(msg) {
+function appendMessage(msg, opts = {}) {
+    if (!opts.skipState) {
+        const changed = upsertLoadedMessage(msg);
+        if (!changed) return;
+    }
     const container = document.getElementById('messages');
 
     // Insert date divider if needed
@@ -1505,7 +1700,10 @@ function applySettings(data) {
         document.getElementById('setting-hops').value = data.max_agent_hops;
     }
     if (data.history_limit !== undefined) {
-        document.getElementById('setting-history').value = String(data.history_limit);
+        const normalized = parseInt(data.history_limit, 10);
+        document.getElementById('setting-history').value = String(
+            Number.isFinite(normalized) && normalized > 0 ? normalized : DEFAULT_HISTORY_PAGE_SIZE
+        );
     }
     if (data.contrast) {
         document.body.classList.toggle('high-contrast', data.contrast === 'high');
@@ -1516,6 +1714,12 @@ function applySettings(data) {
     }
     if (data.channels && Array.isArray(data.channels)) {
         channelList = data.channels;
+        for (const key of Object.keys(loadedChannelMessages)) {
+            if (!channelList.includes(key)) delete loadedChannelMessages[key];
+        }
+        for (const key of Object.keys(channelHistoryState)) {
+            if (!channelList.includes(key)) delete channelHistoryState[key];
+        }
         // If active channel was deleted, switch to general
         if (!channelList.includes(activeChannel)) {
             activeChannel = 'general';
@@ -1524,6 +1728,7 @@ function applySettings(data) {
             filterMessagesByChannel();
         }
         renderChannelTabs();
+        renderLoadMoreButton();
 
         if (pendingChannelSwitch && channelList.includes(pendingChannelSwitch)) {
             const name = pendingChannelSwitch;
@@ -1543,7 +1748,7 @@ function toggleSettings() {
 }
 
 function clearChat() {
-    if (!confirm(`Clear all messages in #${activeChannel}? This cannot be undone.`)) return;
+    if (!confirm(`Clear visible message history in #${activeChannel}? Older messages stay archived on the server.`)) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'message', text: '/clear', sender: username, channel: activeChannel }));
     }
@@ -1554,8 +1759,7 @@ function saveSettings() {
     const newUsername = document.getElementById('setting-username').value.trim();
     const newFont = document.getElementById('setting-font').value;
     const newHops = document.getElementById('setting-hops').value;
-    const histVal = document.getElementById('setting-history').value;
-    const newHistory = histVal === 'all' ? 'all' : (parseInt(histVal) || 50);
+    const newHistory = parseInt(document.getElementById('setting-history').value, 10) || DEFAULT_HISTORY_PAGE_SIZE;
     const newContrast = document.getElementById('setting-contrast').value;
     const newRulesRefresh = document.getElementById('setting-rules-refresh').value;
 
@@ -2449,11 +2653,17 @@ document.addEventListener('keydown', (e) => {
 });
 
 function handleDeleteBroadcast(ids) {
+    const affectedChannels = removeLoadedMessages(ids);
     for (const id of ids) {
         const el = document.querySelector(`.message[data-id="${id}"]`);
         if (el) el.remove();
         // Clean from todos
         delete todos[id];
+    }
+    if (affectedChannels.has(activeChannel)) {
+        rebuildChannelMessages(activeChannel);
+    } else {
+        renderLoadMoreButton();
     }
     // Refresh todos panel if open
     const panel = document.getElementById('pins-panel');

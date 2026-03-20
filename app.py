@@ -60,13 +60,15 @@ room_settings: dict = {
     "username": "user",
     "font": "sans",
     "channels": ["general"],
-    "history_limit": "all",
+    "history_limit": 50,
     "contrast": "normal",
 }
 
 # Channel validation
 _CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
 MAX_CHANNELS = 8
+DEFAULT_HISTORY_PAGE_SIZE = 50
+MAX_HISTORY_PAGE_SIZE = 500
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -145,12 +147,26 @@ def _load_settings():
         room_settings["channels"] = ["general"]
     elif "general" not in room_settings["channels"]:
         room_settings["channels"].insert(0, "general")
+    room_settings["history_limit"] = _coerce_history_limit(
+        room_settings.get("history_limit", DEFAULT_HISTORY_PAGE_SIZE)
+    )
 
 
 def _save_settings():
     p = _settings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(room_settings, indent=2), "utf-8")
+
+
+def _coerce_history_limit(value) -> int:
+    text = str(value).strip().lower()
+    if text == "all":
+        return DEFAULT_HISTORY_PAGE_SIZE
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        return DEFAULT_HISTORY_PAGE_SIZE
+    return max(1, min(parsed, MAX_HISTORY_PAGE_SIZE))
 
 
 def _extract_agent_token(request: Request) -> str:
@@ -185,6 +201,7 @@ def _clean_attachments(raw_attachments) -> list[dict]:
         "content_type",
         "size_bytes",
         "truncated",
+        "security_warnings",
     }
     cleaned = []
     for raw in raw_attachments:
@@ -1275,19 +1292,30 @@ async def websocket_endpoint(websocket: WebSocket):
                     "color": inst.get("color", "#888"),
                 }))
 
-    # Send history (per channel based on history_limit)
-    limit_val = room_settings.get("history_limit", "all")
-    count = 10000 if limit_val == "all" else int(limit_val)
-    
+    # Send only a recent visible page per channel on connect.
+    count = _coerce_history_limit(room_settings.get("history_limit", DEFAULT_HISTORY_PAGE_SIZE))
     history = []
+    history_state = []
     for ch in room_settings["channels"]:
-        history.extend(store.get_recent(count, channel=ch))
-    
+        ch_history = store.get_recent(count, channel=ch)
+        history.extend(ch_history)
+        oldest_loaded_id = ch_history[0]["id"] if ch_history else None
+        has_more = bool(
+            oldest_loaded_id and store.get_before(oldest_loaded_id, limit=1, channel=ch)
+        )
+        history_state.append({
+            "channel": ch,
+            "oldest_loaded_id": oldest_loaded_id,
+            "has_more": has_more,
+        })
+
     # Sort history by timestamp to interleave messages from different channels correctly
     history.sort(key=lambda m: m.get("timestamp", 0))
-    
+
     for msg in history:
         await websocket.send_text(json.dumps({"type": "message", "data": msg}))
+    for item in history_state:
+        await websocket.send_text(json.dumps({"type": "history_state", "data": item}))
 
     # Send status
     await broadcast_status()
@@ -1468,15 +1496,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     except (ValueError, TypeError):
                         pass
                 if "history_limit" in new:
-                    val = str(new["history_limit"]).strip().lower()
-                    if val == "all":
-                        room_settings["history_limit"] = "all"
-                    else:
-                        try:
-                            val_int = int(val)
-                            room_settings["history_limit"] = max(1, min(val_int, 10000))
-                        except (ValueError, TypeError):
-                            pass
+                    room_settings["history_limit"] = _coerce_history_limit(new["history_limit"])
                 _save_settings()
                 await broadcast_settings()
 
@@ -1647,6 +1667,18 @@ async def get_messages(since_id: int = 0, limit: int = 50, channel: str = ""):
     if since_id:
         return store.get_since(since_id, channel=ch)
     return store.get_recent(limit, channel=ch)
+
+
+@app.get("/api/messages/page")
+async def get_messages_page(before_id: int, channel: str = "general", limit: int = 50):
+    ch = (channel or "general").strip() or "general"
+    page_size = _coerce_history_limit(limit)
+    messages = store.get_before(before_id, limit=page_size, channel=ch)
+    oldest_loaded_id = messages[0]["id"] if messages else before_id
+    has_more = bool(
+        messages and store.get_before(oldest_loaded_id, limit=1, channel=ch)
+    )
+    return {"messages": messages, "has_more": has_more}
 
 
 @app.post("/api/send")

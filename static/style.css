@@ -649,6 +649,40 @@ main#timeline {
     display: none;
 }
 
+#load-more-row {
+    display: flex;
+    justify-content: center;
+    padding: 8px 0 4px;
+}
+
+#load-more-row.hidden {
+    display: none;
+}
+
+#load-more-btn {
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+    background: color-mix(in srgb, var(--panel) 78%, var(--accent) 22%);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 7px 14px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+}
+
+#load-more-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--panel) 68%, var(--accent) 32%);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+#load-more-btn:disabled {
+    opacity: 0.65;
+    cursor: progress;
+}
+
 .loading-spinner {
     width: 16px;
     height: 16px;

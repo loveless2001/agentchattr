@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>agentchattr</title>
-    <link rel="stylesheet" href="/static/style.css?v=224">
+    <link rel="stylesheet" href="/static/style.css?v=225">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=224">
     <link rel="icon" href="/static/favicon.ico">
@@ -89,9 +89,8 @@
             <div class="settings-field">
                 <label for="setting-history">History</label>
                 <select id="setting-history">
-                    <option value="all">All</option>
                     <option value="25">25</option>
-                    <option value="50">50</option>
+                    <option value="50" selected>50</option>
                     <option value="100">100</option>
                     <option value="200">200</option>
                     <option value="500">500</option>
@@ -158,6 +157,9 @@
                     <div class="loading-spinner"></div>
                     <span>Loading messages...</span>
                 </div>
+                <div id="load-more-row" class="hidden">
+                    <button id="load-more-btn" type="button" onclick="loadMoreMessages()">Load more</button>
+                </div>
                 <div id="messages"></div>
                 <div id="typing-indicator" class="hidden">
                     <span class="typing-name"></span> is thinking...
@@ -202,7 +204,7 @@
                         </div>
                         <div class="job-input-row">
                             <input type="file" id="job-attachment-input" class="hidden-file-input"
-                                accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.pdf,.docx,.md,.markdown,.txt" multiple>
+                                accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.pdf,.docx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.csv,.xml,.html,.css,.sh,.bash,.go,.rs,.java,.rb,.lua,.c,.cpp,.h,.log,.ini,.cfg,.sql,.env,.conf" multiple>
                             <textarea id="jobs-conv-input-text" placeholder="Message..." rows="1"></textarea>
                             <button id="job-attachment-btn" class="attach-btn" type="button"
                                 onclick="openJobAttachmentPicker()" title="Attach files">
@@ -264,7 +266,7 @@
                 <textarea id="input" placeholder="Type a message... (use @name to mention agents)" rows="1"
                     autofocus></textarea>
                 <input type="file" id="attachment-input" class="hidden-file-input"
-                    accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.pdf,.docx,.md,.markdown,.txt" multiple>
+                    accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.pdf,.docx,.md,.markdown,.txt,.py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.toml,.csv,.xml,.html,.css,.sh,.bash,.go,.rs,.java,.rb,.lua,.c,.cpp,.h,.log,.ini,.cfg,.sql,.env,.conf" multiple>
                 <button id="attachment-btn" class="attach-btn" type="button" onclick="openAttachmentPicker()"
                     title="Attach files">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -356,9 +358,9 @@
     <script src="/static/store.js?v=223"></script>
     <script src="/static/sessions.js?v=223"></script>
     <script src="/static/jobs.js?v=223"></script>
-    <script src="/static/channels.js?v=223"></script>
+    <script src="/static/channels.js?v=224"></script>
     <script src="/static/rules-panel.js?v=223"></script>
-    <script src="/static/chat.js?v=223"></script>
+    <script src="/static/chat.js?v=224"></script>
 </body>
 
 </html>

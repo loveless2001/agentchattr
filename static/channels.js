@@ -119,6 +119,7 @@ function switchChannel(name) {
     localStorage.setItem('agentchattr-channel', name);
     filterMessagesByChannel();
     renderChannelTabs();
+    if (window.renderLoadMoreButton) window.renderLoadMoreButton();
     Store.set('activeChannel', name);
     // Restore: scroll to saved message, or bottom if none saved
     const savedId = _channelScrollMsg[name];
@@ -137,6 +138,7 @@ function filterMessagesByChannel() {
         const ch = el.dataset.channel || 'general';
         el.style.display = ch === window.activeChannel ? '' : 'none';
     }
+    if (window.renderLoadMoreButton) window.renderLoadMoreButton();
 }
 
 // ---------------------------------------------------------------------------
