@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -49,6 +50,44 @@ def _pane_content(tmux_session: str) -> str:
         return result.stdout if result.returncode == 0 else ""
     except Exception:
         return ""
+
+
+_TRUST_PATTERNS = [
+    "Do you trust the contents of this directory",  # codex
+    "Do you want to proceed?",                      # claude MCP approval
+    "Press enter to continue",                      # codex trust
+]
+
+
+def _auto_approve_trust_prompts(session_name: str, timeout: int = 60):
+    """Watch a tmux pane for trust/approval prompts and auto-send Enter.
+
+    Runs for up to `timeout` seconds after session creation, covering the
+    startup window where these prompts appear.
+    """
+    deadline = time.time() + timeout
+    approved = set()
+    while time.time() < deadline:
+        if not _session_exists(session_name):
+            return
+        content = _pane_content(session_name)
+        for pattern in _TRUST_PATTERNS:
+            if pattern in content and pattern not in approved:
+                print(f"  [auto-approve] Detected trust prompt in {session_name}: '{pattern}'")
+                time.sleep(0.5)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", session_name, "Enter"],
+                    capture_output=True,
+                )
+                print(f"  [auto-approve] Sent Enter to {session_name}")
+                approved.add(pattern)
+                time.sleep(1)
+                break
+        time.sleep(0.5)
+    if approved:
+        print(f"  [auto-approve] Done for {session_name}: approved {len(approved)} prompt(s)")
+    else:
+        print(f"  [auto-approve] No trust prompts detected for {session_name} (timed out after {timeout}s)")
 
 
 def _cli_is_ready(tmux_session: str) -> bool:
@@ -210,6 +249,13 @@ def run_agent(
             if result.returncode != 0:
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
+
+            # Auto-approve trust/permission prompts during startup
+            threading.Thread(
+                target=_auto_approve_trust_prompts,
+                args=(session_name,),
+                daemon=True,
+            ).start()
 
             if detached:
                 print(f"  Detached startup complete.")
