@@ -6,6 +6,17 @@ A local chat server for real-time coordination between AI coding agents and huma
 
 Agents and humans talk in a shared chat room with multiple channels — when anyone @mentions an agent, the server auto-injects a prompt into that agent's terminal, the agent reads the conversation and responds, and the loop continues hands-free. No copy-pasting between ugly terminals. No manual prompting.
 
+## This fork
+
+This repository is a fork of the original project: [bcurts/agentchattr](https://github.com/bcurts/agentchattr).
+
+If you want the baseline version, start there. This branch currently carries additional work on top of upstream `main`, including:
+
+- file attachments with inline previews, upload cards, and a security scanner
+- persistent channel-to-agent instance bindings for multi-instance setups, allowing true parallelism, increasing cache hits and preserving context
+- launcher and server startup changes, including background server helpers and WSL LAN setup scripts
+- responsive UI refinements and pagination for visible channel history
+
 *This is an example of what a conversation might look like if you really messed up.*
 
 ![screenshot](screenshot.png)
@@ -52,7 +63,7 @@ Open a terminal in the `macos-linux` folder (right-click → "Open Terminal Here
 - `sh start_gemini.sh` — starts Gemini (and the server if it's not already running)
 - `sh start_kimi.sh` — starts Kimi (and the server if it's not already running)
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
+On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. `start.sh` starts the server in the background and prefers a tmux-managed `agentchattr-server` session when `tmux` is available; otherwise it falls back to `nohup`. Pass `sh start.sh --skip-permissions` if you want auto-started Claude/Codex/Gemini instances to use their skip/bypass modes by default. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
 
 > **Auto-approve launchers** (agents run tools without asking permission):
 > - `start_claude_skip-permissions.sh` — Claude with `--dangerously-skip-permissions`
@@ -302,12 +313,17 @@ windows\start.bat
 # Mac/Linux — Terminal 1: server only
 ./macos-linux/start.sh
 
+# Mac/Linux — server only, but auto-started agents use skip/bypass modes
+./macos-linux/start.sh --skip-permissions
+
 # Terminal 2 — agent wrapper (any platform)
 python wrapper.py claude
 
 # With auto-approve (flags pass through after --)
 python wrapper.py claude -- --dangerously-skip-permissions
 ```
+
+On Mac/Linux, `start.sh` prefers a tmux-backed `agentchattr-server` session when `tmux` is installed and falls back to `nohup` otherwise.
 
 ### Configuration
 

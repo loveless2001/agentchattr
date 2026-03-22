@@ -58,6 +58,31 @@ is_server_healthy() {
 
 mkdir -p data
 LOG_FILE="data/server.log"
+SERVER_SESSION="agentchattr-server"
+SERVER_PID=""
+STARTED_WITH_TMUX=0
+
+start_server() {
+    if command -v tmux >/dev/null 2>&1; then
+        tmux kill-session -t "$SERVER_SESSION" >/dev/null 2>&1 || true
+        if [ "$AUTO_APPROVE" -eq 1 ]; then
+            tmux new-session -d -s "$SERVER_SESSION" "cd '$(pwd)' && AGENTCHATTR_AUTO_APPROVE=1 .venv/bin/python -c 'import os,sys; os.environ[\"AGENTCHATTR_NETWORK_CONFIRM\"]=\"YES\"; import run; sys.argv=[\"run.py\",\"--allow-network\"]; run.main()' >>'$LOG_FILE' 2>&1"
+        else
+            tmux new-session -d -s "$SERVER_SESSION" "cd '$(pwd)' && .venv/bin/python -c 'import os,sys; os.environ[\"AGENTCHATTR_NETWORK_CONFIRM\"]=\"YES\"; import run; sys.argv=[\"run.py\",\"--allow-network\"]; run.main()' >>'$LOG_FILE' 2>&1"
+        fi
+        SERVER_PID="$(tmux list-panes -t "$SERVER_SESSION" -F '#{pane_pid}' | head -n 1)"
+        STARTED_WITH_TMUX=1
+    else
+        if [ "$AUTO_APPROVE" -eq 1 ]; then
+            AGENTCHATTR_AUTO_APPROVE=1 nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
+        else
+            nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
+        fi
+        SERVER_PID=$!
+    fi
+
+    echo "$SERVER_PID" > data/server.pid
+}
 
 if is_server_healthy; then
     echo "agentchattr is already running."
@@ -66,22 +91,23 @@ if is_server_healthy; then
     exit 0
 fi
 
-if [ "$AUTO_APPROVE" -eq 1 ]; then
-    nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
-else
-    nohup .venv/bin/python -c 'import os,sys; os.environ["AGENTCHATTR_NETWORK_CONFIRM"]="YES"; import run; sys.argv=["run.py","--allow-network"]; run.main()' >>"$LOG_FILE" 2>&1 &
-fi
-SERVER_PID=$!
-echo "$SERVER_PID" > data/server.pid
+start_server
 
 i=0
 while [ "$i" -lt 30 ]; do
     if is_server_healthy; then
         break
     fi
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo "Server exited unexpectedly. Check $LOG_FILE"
-        exit 1
+    if [ "$STARTED_WITH_TMUX" -eq 1 ]; then
+        if ! tmux has-session -t "$SERVER_SESSION" >/dev/null 2>&1; then
+            echo "Server exited unexpectedly. Check $LOG_FILE"
+            exit 1
+        fi
+    else
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "Server exited unexpectedly. Check $LOG_FILE"
+            exit 1
+        fi
     fi
     sleep 0.5
     i=$((i + 1))
@@ -94,6 +120,9 @@ if is_server_healthy; then
     echo "Agents now auto-start on first @mention and run in background tmux sessions."
     if [ "$AUTO_APPROVE" -eq 1 ]; then
         echo "Auto-started Claude/Codex/Gemini instances will use their skip-permissions / bypass modes."
+    fi
+    if [ "$STARTED_WITH_TMUX" -eq 1 ]; then
+        echo "Attach with: tmux attach -t $SERVER_SESSION"
     fi
     exit 0
 fi

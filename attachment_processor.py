@@ -30,7 +30,7 @@ CODE_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".yaml", ".yml",
     ".toml", ".csv", ".xml", ".html", ".css", ".sh", ".bash",
     ".go", ".rs", ".java", ".rb", ".lua", ".c", ".cpp", ".h",
-    ".log", ".ini", ".cfg", ".sql", ".env", ".conf",
+    ".log", ".ini", ".cfg", ".sql", ".env", ".conf", ".ipynb",
 }
 # Extension → markdown language hint for fenced code blocks
 _EXT_TO_LANG = {
@@ -42,6 +42,7 @@ _EXT_TO_LANG = {
     ".lua": "lua", ".c": "c", ".cpp": "cpp", ".h": "c",
     ".log": "log", ".ini": "ini", ".cfg": "ini", ".sql": "sql",
     ".env": "bash", ".conf": "conf",
+    ".ipynb": "json",
 }
 # Conservative MIME fallback for unknown extensions
 _ALLOWED_TEXT_MIMES = {"text/", "application/json", "application/xml",
