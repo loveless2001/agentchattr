@@ -1,14 +1,16 @@
-"""agentchattr — FastAPI web UI + agent auto-trigger."""
+"""agentchattr - FastAPI web UI + agent auto-trigger."""
 
 import asyncio
+import fnmatch
 import ipaddress
 import json
+import logging
 import mimetypes
 import re as _re
+import subprocess
 import sys
 import threading
 import uuid
-import logging
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -227,6 +229,10 @@ def _install_security_middleware(token: str, cfg: dict):
     _self.session_token = token
     port = cfg.get("server", {}).get("port", 8300)
     configured_host = str(cfg.get("server", {}).get("host", "127.0.0.1")).strip()
+    raw_allowed_origins = cfg.get("server", {}).get("allowed_origins", [])
+    if isinstance(raw_allowed_origins, str):
+        raw_allowed_origins = [raw_allowed_origins]
+    allowed_origin_rules = [str(rule).strip() for rule in raw_allowed_origins if str(rule).strip()]
 
     def _is_ip_literal(hostname: str) -> bool:
         try:
@@ -234,6 +240,34 @@ def _install_security_middleware(token: str, cfg: dict):
             return True
         except ValueError:
             return False
+
+    def _hostname_matches(hostname: str, pattern: str) -> bool:
+        host = hostname.strip().rstrip(".").lower()
+        expected = pattern.strip().rstrip(".").lower()
+        return bool(host and expected) and fnmatch.fnmatchcase(host, expected)
+
+    def _origin_matches_rule(
+        origin_scheme: str,
+        origin_host: str,
+        origin_port: int,
+        rule: str,
+    ) -> bool:
+        parsed_rule = urlsplit(rule if "://" in rule else f"//{rule}")
+        rule_host = parsed_rule.hostname or ""
+        if not _hostname_matches(origin_host, rule_host):
+            return False
+
+        if parsed_rule.scheme and parsed_rule.scheme != origin_scheme:
+            return False
+
+        if parsed_rule.port is not None:
+            return origin_port == parsed_rule.port
+
+        if parsed_rule.scheme == "https":
+            return origin_port == 443
+        if parsed_rule.scheme == "http":
+            return origin_port == 80
+        return True
 
     def _origin_allowed(origin: str, request: Request) -> bool:
         try:
@@ -243,8 +277,13 @@ def _install_security_middleware(token: str, cfg: dict):
         if parsed.scheme not in ("http", "https"):
             return False
 
+        origin_scheme = parsed.scheme
         origin_host = parsed.hostname or ""
-        origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        origin_port = parsed.port or (443 if origin_scheme == "https" else 80)
+
+        if any(_origin_matches_rule(origin_scheme, origin_host, origin_port, rule) for rule in allowed_origin_rules):
+            return True
+
         if origin_port != port:
             return False
 
@@ -735,13 +774,146 @@ def _channel_session_name(base: str, channel: str) -> str:
     return f"agentchattr-{base}-{channel}"
 
 
+def _tmux_session_exists(session_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+async def _stop_channel_agent_terminals(channel: str) -> dict:
+    """Stop channel-scoped wrappers so they can auto-spawn again later."""
+    stopped_sessions: list[str] = []
+    stopped_instances: list[str] = []
+    rename_events: list[dict] = []
+
+    import mcp_bridge
+
+    for agent_name in config.get("agents", {}):
+        session_name = _channel_session_name(agent_name, channel)
+        if _tmux_session_exists(session_name):
+            stopped_sessions.append(session_name)
+        if launcher:
+            launcher.kill_session(session_name)
+
+        if not registry:
+            continue
+
+        bound_name = None
+        if channel_bindings:
+            bound_name = channel_bindings.get(channel, agent_name)
+        instance_name = bound_name or f"{agent_name}-{channel}"
+        canonical = registry.resolve_name(instance_name)
+        if not registry.is_registered(canonical):
+            continue
+
+        result = registry.deregister(canonical)
+        if not result:
+            continue
+
+        stopped_instances.append(canonical)
+        mcp_bridge.purge_identity(canonical)
+        registry.clean_renames_for(canonical)
+
+        renamed = result.get("_renamed_back")
+        if renamed:
+            mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+            store.rename_sender(renamed["old"], renamed["new"])
+            rename_events.append({
+                "type": "agent_renamed",
+                "old_name": renamed["old"],
+                "new_name": renamed["new"],
+            })
+
+    for event in rename_events:
+        await _broadcast(json.dumps(event))
+
+    return {
+        "sessions": stopped_sessions,
+        "instances": stopped_instances,
+    }
+
+
+async def _compact_channel_agent_terminals(channel: str) -> list[str]:
+    """Send /compact directly into active channel-scoped CLI sessions."""
+    targets: list[str] = []
+    for entry in _get_channel_online_agent_entries(channel):
+        target = entry["target"]
+        if not agents.is_available(target):
+            continue
+        await agents.trigger(
+            target,
+            message="system: /compact",
+            channel=channel,
+            inject_text="/compact",
+        )
+        targets.append(target)
+    return targets
+
+
 def _resolve_bound_channel_agent(base: str, channel: str) -> str | None:
     if not registry or not channel_bindings:
         return None
     return channel_bindings.resolve(channel, base, registry)
 
 
-async def _resolve_routing_target(target: str, channel: str, *, autostart: bool) -> dict | None:
+def _is_online_broadcast_text(text: str) -> bool:
+    return bool(_re.search(r"@(?:all|both)\b", text or "", _re.IGNORECASE))
+
+
+def _get_channel_online_agent_entries(channel: str) -> list[dict]:
+    """Return channel-scoped agents that are both online and backed by live tmux."""
+    if not registry:
+        return []
+
+    import mcp_bridge
+
+    entries = []
+    seen = set()
+    for base in config.get("agents", {}):
+        session_name = _channel_session_name(base, channel)
+        if not _tmux_session_exists(session_name):
+            continue
+
+        bound = _resolve_bound_channel_agent(base, channel)
+        candidate = bound or f"{base}-{channel}"
+        canonical = registry.resolve_name(candidate)
+        if not registry.is_registered(canonical):
+            continue
+
+        inst = registry.get_instance(canonical)
+        if not inst or inst.get("state") != "active":
+            continue
+        if not mcp_bridge.is_online(canonical):
+            continue
+        if canonical in seen:
+            continue
+
+        seen.add(canonical)
+        entries.append({
+            "requested": base,
+            "target": canonical,
+            "launch_result": None,
+        })
+
+    return entries
+
+
+def _get_channel_online_agent_bases(channel: str) -> list[str]:
+    return [entry["requested"] for entry in _get_channel_online_agent_entries(channel)]
+
+
+async def _resolve_routing_target(
+    target: str,
+    channel: str,
+    *,
+    autostart: bool,
+    channel_online_only: bool = False,
+) -> dict | None:
     if not registry:
         return {"target": target, "requested": target, "launch_result": None}
 
@@ -751,6 +923,12 @@ async def _resolve_routing_target(target: str, channel: str, *, autostart: bool)
     # so each channel gets its own agent instance instead of reusing another
     # channel's instance.
     if is_base_family:
+        if channel_online_only:
+            for entry in _get_channel_online_agent_entries(channel):
+                if entry["requested"] == target:
+                    return dict(entry)
+            return None
+
         # Check for channel-scoped instance first: {agent}-{channel}
         channel_name = f"{target}-{channel}"
         inst = registry.get_instance(channel_name)
@@ -785,7 +963,13 @@ async def _resolve_routing_target(target: str, channel: str, *, autostart: bool)
     return {"target": target, "requested": target, "launch_result": None}
 
 
-async def _expand_routing_targets(raw_targets: list[str], channel: str, *, autostart: bool) -> list[dict]:
+async def _expand_routing_targets(
+    raw_targets: list[str],
+    channel: str,
+    *,
+    autostart: bool,
+    channel_online_only: bool = False,
+) -> list[dict]:
     base_mentions = {
         t for t in raw_targets
         if t in config.get("agents", {})
@@ -799,7 +983,12 @@ async def _expand_routing_targets(raw_targets: list[str], channel: str, *, autos
         # double-triggering.  But never skip when target IS the base name itself.
         if inst and inst.get("base") in base_mentions and target != inst.get("base"):
             continue
-        resolved = await _resolve_routing_target(target, channel, autostart=autostart)
+        resolved = await _resolve_routing_target(
+            target,
+            channel,
+            autostart=autostart,
+            channel_online_only=channel_online_only,
+        )
         if not resolved:
             continue
         final_target = resolved["target"]
@@ -864,7 +1053,7 @@ async def _handle_new_message(msg: dict):
     channel = msg.get("channel", "general")
     # Strip @mentions to find the slash command (e.g. "@claude @codex /hatmaking")
     stripped = _re.sub(r"@[\w-]+\s*", "", text).strip().lower()
-    _broadcast_cmds = ("/hatmaking", "/artchallenge", "/roastreview", "/poetry")
+    _broadcast_cmds = ("/all", "/hatmaking", "/artchallenge", "/roastreview", "/poetry")
     cmd_word = stripped.split()[0] if stripped else ""
     is_broadcast_cmd = cmd_word in _broadcast_cmds
     known_agents = set(registry.get_all_names()) if registry else set()
@@ -904,16 +1093,54 @@ async def _handle_new_message(msg: dict):
         await broadcast_status()
         return
 
+    if cmd_word == "/all":
+        parts = stripped.split(None, 1)
+        body = parts[1] if len(parts) > 1 else ""
+        online_bases = _get_channel_online_agent_bases(channel)
+        if not online_bases:
+            store.add(
+                "system",
+                f"No online channel agents with active tmux for #{channel}.",
+                msg_type="system",
+                channel=channel,
+            )
+            return
+        mentions = " ".join(f"@{name}" for name in online_bases)
+        expanded = f"{mentions} {body}".strip()
+        store.add(sender, expanded, channel=channel, msg_type="online_broadcast")
+        return
+
     if stripped == "/roastreview":
-        agent_names = registry.get_all_names() if registry else list(config.get("agents", {}).keys())
+        agent_names = _get_channel_online_agent_bases(channel)
+        if not agent_names:
+            store.add(
+                "system",
+                f"No online channel agents with active tmux for #{channel}.",
+                msg_type="system",
+                channel=channel,
+            )
+            return
         mentions = " ".join(f"@{a}" for a in agent_names)
-        store.add(sender, f"{mentions} Time for a roast review! Inspect each other's work and constructively roast it.", channel=channel)
+        store.add(
+            sender,
+            f"{mentions} Time for a roast review! Inspect each other's work and constructively roast it.",
+            channel=channel,
+            msg_type="online_broadcast",
+        )
         return
 
     if stripped.startswith("/artchallenge"):
         parts = stripped.split(None, 1)
         theme = parts[1] if len(parts) > 1 else "anything you like"
-        agent_names = registry.get_all_names() if registry else list(config.get("agents", {}).keys())
+        agent_names = _get_channel_online_agent_bases(channel)
+        if not agent_names:
+            store.add(
+                "system",
+                f"No online channel agents with active tmux for #{channel}.",
+                msg_type="system",
+                channel=channel,
+            )
+            return
         mentions = " ".join(f"@{a}" for a in agent_names)
         store.add(
             sender,
@@ -921,11 +1148,20 @@ async def _handle_new_message(msg: dict):
             "Write your SVG code to a .svg file, then attach it using chat_send(image_path=...). "
             "Make it creative, keep it under 5KB. Let's see what you've got!",
             channel=channel,
+            msg_type="online_broadcast",
         )
         return
 
     if stripped == "/hatmaking":
-        agent_names = registry.get_all_names() if registry else list(config.get("agents", {}).keys())
+        agent_names = _get_channel_online_agent_bases(channel)
+        if not agent_names:
+            store.add(
+                "system",
+                f"No online channel agents with active tmux for #{channel}.",
+                msg_type="system",
+                channel=channel,
+            )
+            return
         mentions = " ".join(f"@{a}" for a in agent_names)
         all_instances = registry.get_all() if registry else {}
         agents_cfg = config.get("agents", {})
@@ -942,6 +1178,7 @@ async def _handle_new_message(msg: dict):
             "Call chat_set_hat(sender=your_name, svg='<svg ...>...</svg>') to wear it. "
             "Be creative — top hats, party hats, crowns, propeller beanies, whatever you want!",
             channel=channel,
+            msg_type="online_broadcast",
         )
         return
 
@@ -950,14 +1187,22 @@ async def _handle_new_message(msg: dict):
         form = parts[1] if len(parts) > 1 else "haiku"
         if form not in ("haiku", "limerick", "sonnet"):
             form = "haiku"
-        agent_names = registry.get_all_names() if registry else list(config.get("agents", {}).keys())
+        agent_names = _get_channel_online_agent_bases(channel)
+        if not agent_names:
+            store.add(
+                "system",
+                f"No online channel agents with active tmux for #{channel}.",
+                msg_type="system",
+                channel=channel,
+            )
+            return
         mentions = " ".join(f"@{a}" for a in agent_names)
         prompts = {
             "haiku": "Write a haiku about the current state of this codebase.",
             "limerick": "Write a limerick about the current state of this codebase.",
             "sonnet": "Write a sonnet about the current state of this codebase.",
         }
-        store.add(sender, f"{mentions} {prompts[form]}", channel=channel)
+        store.add(sender, f"{mentions} {prompts[form]}", channel=channel, msg_type="online_broadcast")
         return
 
     # Detect session draft blocks from agents only.
@@ -1005,7 +1250,13 @@ async def _handle_new_message(msg: dict):
             )
 
     raw_targets = router.get_targets(sender, text, channel)
-    targets = await _expand_routing_targets(raw_targets, channel, autostart=True)
+    channel_online_only = msg_type == "online_broadcast" or _is_online_broadcast_text(text)
+    targets = await _expand_routing_targets(
+        raw_targets,
+        channel,
+        autostart=not channel_online_only,
+        channel_online_only=channel_online_only,
+    )
 
     if router.is_paused(channel):
         # Only emit the loop guard notice once per pause
@@ -1347,9 +1598,45 @@ async def websocket_endpoint(websocket: WebSocket):
                         store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
                         await broadcast_status()
                         continue
+                    if cmd == "/sleep":
+                        stopped = await _stop_channel_agent_terminals(channel)
+                        if stopped["sessions"] or stopped["instances"]:
+                            store.add(
+                                "system",
+                                f"Stopped auto-started agent terminals for #{channel}. "
+                                "They will auto-start again on the next @mention.",
+                                msg_type="system",
+                                channel=channel,
+                            )
+                        else:
+                            store.add(
+                                "system",
+                                f"No auto-started agent terminals were running for #{channel}.",
+                                msg_type="system",
+                                channel=channel,
+                            )
+                        continue
+                    if cmd == "/compact":
+                        compacted = await _compact_channel_agent_terminals(channel)
+                        if compacted:
+                            mentions = ", ".join(f"@{name}" for name in compacted)
+                            store.add(
+                                "system",
+                                f"Sent `/compact` to {mentions} for #{channel}.",
+                                msg_type="system",
+                                channel=channel,
+                            )
+                        else:
+                            store.add(
+                                "system",
+                                f"No online channel agents with active tmux for #{channel}.",
+                                msg_type="system",
+                                channel=channel,
+                            )
+                        continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.
-                    if cmd in ("/hatmaking", "/artchallenge", "/roastreview", "/poetry"):
+                    if cmd in ("/all", "/hatmaking", "/artchallenge", "/roastreview", "/poetry"):
                         await _handle_new_message({"sender": sender, "text": text, "channel": channel})
                         continue
 
@@ -2056,7 +2343,13 @@ async def post_job_message(job_id: int, request: Request):
     if job:
         channel = job.get("channel", "general")
         raw_targets = router.get_targets(sender, text, channel)
-        targets = await _expand_routing_targets(raw_targets, channel, autostart=True)
+        channel_online_only = _is_online_broadcast_text(text)
+        targets = await _expand_routing_targets(
+            raw_targets,
+            channel,
+            autostart=not channel_online_only,
+            channel_online_only=channel_online_only,
+        )
         known_agents = set(registry.get_all_names()) if registry else set()
         known_agents.update(config.get("agents", {}).keys())
 

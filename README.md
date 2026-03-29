@@ -205,6 +205,7 @@ Type `/` in the input to open a Slack-style autocomplete menu:
 
 - `/summary @agent` — ask an agent to summarize recent messages in the current channel
 - `/continue` — resume after the loop guard pauses an agent-to-agent chain
+- `/compact` — send the native `/compact` command to active channel CLIs
 - `/clear` — clear messages in the current channel
 
 ### Fun stuff

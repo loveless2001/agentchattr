@@ -421,8 +421,9 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                 lines = f.readlines()
             queue_file.write_text("", "utf-8")
 
-            # Group entries by channel
+            # Group normal triggers by channel; keep direct CLI injections as-is
             channel_triggers: dict[str, dict] = {}
+            direct_injections: list[str] = []
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -430,6 +431,10 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                 try:
                     entry_data = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                inject_text = entry_data.get("inject_text", "") if isinstance(entry_data, dict) else ""
+                if isinstance(inject_text, str) and inject_text.strip():
+                    direct_injections.append(inject_text.strip())
                     continue
                 ch = entry_data.get("channel", "general") if isinstance(entry_data, dict) else "general"
                 info = channel_triggers.setdefault(ch, {"job_id": None, "custom_prompt": ""})
@@ -440,7 +445,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     if isinstance(raw_prompt, str) and raw_prompt.strip():
                         info["custom_prompt"] = raw_prompt.strip()
 
-            if not channel_triggers:
+            if not channel_triggers and not direct_injections:
                 time.sleep(1)
                 continue
 
@@ -449,30 +454,34 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                 trigger_flag[0] = True
             time.sleep(0.5)
 
-            # Fetch role + rules once (shared across channels)
-            current_name, _ = get_identity_fn()
-            role = _fetch_role(server_port, current_name)
-            if not role and current_name != agent_name:
-                role = _fetch_role(server_port, agent_name)
-
-            _token = get_token_fn() if get_token_fn else ""
-            rules_data = _fetch_active_rules(server_port, _token)
-            trigger_count += 1
-
             rules_suffix = ""
-            if rules_data:
-                ri = rules_data.get("refresh_interval", refresh_interval)
-                need_inject = (
-                    last_rules_epoch == 0
-                    or rules_data["epoch"] != last_rules_epoch
-                    or (ri > 0 and trigger_count % ri == 0)
-                )
-                if need_inject:
-                    if rules_data["rules"]:
-                        rules_text = "; ".join(rules_data["rules"])
-                        rules_suffix = f"\n\nRULES:\n{rules_text}"
-                    last_rules_epoch = rules_data["epoch"]
-                    _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+            role = ""
+            if channel_triggers:
+                # Fetch role + rules only for normal wake prompts.
+                current_name, _ = get_identity_fn()
+                role = _fetch_role(server_port, current_name)
+                if not role and current_name != agent_name:
+                    role = _fetch_role(server_port, agent_name)
+
+                _token = get_token_fn() if get_token_fn else ""
+                rules_data = _fetch_active_rules(server_port, _token)
+                trigger_count += 1
+                if rules_data:
+                    ri = rules_data.get("refresh_interval", refresh_interval)
+                    need_inject = (
+                        last_rules_epoch == 0
+                        or rules_data["epoch"] != last_rules_epoch
+                        or (ri > 0 and trigger_count % ri == 0)
+                    )
+                    if need_inject:
+                        if rules_data["rules"]:
+                            rules_text = "; ".join(rules_data["rules"])
+                            rules_suffix = f"\n\nRULES:\n{rules_text}"
+                        last_rules_epoch = rules_data["epoch"]
+                        _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+
+            for text in direct_injections:
+                inject_fn(text)
 
             # Inject one prompt per channel
             for channel, info in channel_triggers.items():

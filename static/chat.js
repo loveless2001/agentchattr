@@ -1850,6 +1850,7 @@ function showSlashHint(text) {
 }
 
 const SLASH_COMMANDS = [
+    { cmd: '/all', desc: 'Send to all online agents in this channel', broadcast: true },
     { cmd: '/artchallenge', desc: 'SVG art challenge — all agents create artwork (optional theme)', broadcast: true },
     { cmd: '/hatmaking', desc: 'All agents design a hat to wear on their avatar', broadcast: true },
     { cmd: '/roastreview', desc: 'Get all agents to review and roast each other\'s work', broadcast: true },
@@ -1859,6 +1860,8 @@ const SLASH_COMMANDS = [
     { cmd: '/summary', desc: 'Summarize recent messages — tag an agent (e.g. /summary @claude)', broadcast: false, needsMention: true },
     { cmd: '/summarise', desc: 'Summarize recent messages — tag an agent (e.g. /summarise @claude)', broadcast: false, needsMention: true, hidden: true },
     { cmd: '/continue', desc: 'Resume after loop guard pauses', broadcast: false },
+    { cmd: '/compact', desc: 'Send native /compact to active channel CLIs', broadcast: false },
+    { cmd: '/sleep', desc: 'Stop auto-started agent terminals for this channel', broadcast: false },
     { cmd: '/clear', desc: 'Clear messages in current channel', broadcast: false },
 ];
 
