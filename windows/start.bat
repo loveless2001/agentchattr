@@ -67,7 +67,7 @@ goto :wait_server
 echo agentchattr started in the background.
 echo Web UI: http://127.0.0.1:8300
 echo Logs: %LOG_FILE%
-echo Agents now auto-start on first @mention and run in background Windows shells.
+echo Start agents separately with windows\start_claude.bat, windows\start_codex.bat, windows\start_gemini.bat, or windows\start_kimi.bat.
 if "%AUTO_APPROVE%"=="1" (
     echo Auto-started Claude/Codex/Gemini instances will use their skip-permissions / bypass modes.
 )

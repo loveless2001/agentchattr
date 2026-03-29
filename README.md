@@ -14,7 +14,7 @@ If you want the baseline version, start there. This branch currently carries add
 
 - file attachments with inline previews, upload cards, and a security scanner
 - persistent channel-to-agent instance bindings for multi-instance setups, allowing true parallelism, increasing cache hits and preserving context
-- launcher and server startup changes, including background server helpers and WSL LAN setup scripts
+- simplified startup: one server script, background agent auto-spawn on first `@mention`, and WSL LAN helpers
 - responsive UI refinements and pagination for visible channel history
 
 *This is an example of what a conversation might look like if you really messed up.*
@@ -23,24 +23,30 @@ If you want the baseline version, start there. This branch currently carries add
 
 ## Quickstart (Windows)
 
-**1. Open the `windows` folder and double-click a launcher:**
+**1. Open the `windows` folder and run `start.bat`:**
 
-- `start.bat` — starts the chat server only
-- `start_claude.bat` — starts Claude (and the server if it's not already running)
-- `start_codex.bat` — starts Codex (and the server if it's not already running)
-- `start_gemini.bat` — starts Gemini (and the server if it's not already running)
-- `start_kimi.bat` — starts Kimi (and the server if it's not already running)
+`start.bat` is the main entrypoint now. On first launch it creates `.venv`, installs Python dependencies, and starts the server in the background.
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server if one isn't already running, so you can launch in any order. Run multiple launchers for multiple agents — they share the same server.
+If you want auto-started Claude/Codex/Gemini instances to use their skip/bypass modes by default, run:
 
-> **Auto-approve launchers** (agents run tools without asking permission):
-> - `start_claude_skip-permissions.bat` — Claude with `--dangerously-skip-permissions`
-> - `start_codex_bypass.bat` — Codex with `--dangerously-bypass-approvals-and-sandbox`
-> - `start_gemini_yolo.bat` — Gemini with `--yolo`
+```bat
+windows\start.bat --skip-permissions
+```
 
 **2. Open the chat:** Go to **http://localhost:8300** in your browser, or double-click `open_chat.html`.
 
-**3. Talk to your agents:** Type `@claude`, `@codex`, `@gemini`, or `@kimi` in your message, or use the toggle buttons above the input. The agent will wake up, read the chat, and respond.
+**3. Launch the agents you want to use:** Windows does not use the tmux auto-spawn path. Start an agent with one of the compatibility launchers in `windows/`, for example:
+
+- `start_claude.bat`
+- `start_codex.bat`
+- `start_gemini.bat`
+- `start_kimi.bat`
+
+These scripts call `start.bat` if the server is not already running, then launch the wrapper for that agent.
+
+**4. Talk to your agents:** Type `@claude`, `@codex`, `@gemini`, or `@kimi` in your message, or use the toggle buttons above the input. On Windows, the mentioned agent must already be running.
+
+> **Current Windows note:** auto-start-on-mention is only implemented for the tmux-backed Mac/Linux path right now. The most likely future Windows cleanup is a `pywinpty`/ConPTY-backed launcher so the server can manage agent consoles without users opening them manually.
 
 > **Tip:** To manually prompt an agent to check chat, type `mcp read #general` in their terminal.
 
@@ -53,26 +59,25 @@ brew install tmux    # macOS
 # apt install tmux   # Ubuntu/Debian
 ```
 
-**2. Launch an agent:**
+**2. Start the server:**
 
-Open a terminal in the `macos-linux` folder (right-click → "Open Terminal Here", or `cd` into it) and run:
+Open a terminal in the repo root and run:
 
-- `sh start.sh` — starts the chat server only
-- `sh start_claude.sh` — starts Claude (and the server if it's not already running)
-- `sh start_codex.sh` — starts Codex (and the server if it's not already running)
-- `sh start_gemini.sh` — starts Gemini (and the server if it's not already running)
-- `sh start_kimi.sh` — starts Kimi (and the server if it's not already running)
+```bash
+sh macos-linux/start.sh
+```
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. `start.sh` starts the server in the background and prefers a tmux-managed `agentchattr-server` session when `tmux` is available; otherwise it falls back to `nohup`. Pass `sh start.sh --skip-permissions` if you want auto-started Claude/Codex/Gemini instances to use their skip/bypass modes by default. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
+On first launch, `start.sh` creates `.venv`, installs Python dependencies, and starts the server in the background. When `tmux` is available it prefers a tmux-managed `agentchattr-server` session; otherwise it falls back to `nohup`.
 
-> **Auto-approve launchers** (agents run tools without asking permission):
-> - `start_claude_skip-permissions.sh` — Claude with `--dangerously-skip-permissions`
-> - `start_codex_bypass.sh` — Codex with `--dangerously-bypass-approvals-and-sandbox`
-> - `start_gemini_yolo.sh` — Gemini with `--yolo`
+If you want auto-started Claude/Codex/Gemini instances to use their skip/bypass modes by default, run:
+
+```bash
+sh macos-linux/start.sh --skip-permissions
+```
 
 **3. Open the chat:** Go to **http://localhost:8300** or open `open_chat.html`.
 
-**4. Talk to your agents:** Type `@claude`, `@codex`, `@gemini`, or `@kimi` in your message, or use the toggle buttons above the input. The agent will wake up, read the chat, and respond.
+**4. Talk to your agents:** Type `@claude`, `@codex`, `@gemini`, or `@kimi` in your message, or use the toggle buttons above the input. On the first `@mention`, the server auto-starts that agent in a background `tmux` session for the current channel. Detach with `Ctrl+B, D` — the agent keeps running. Reattach with `tmux attach -t agentchattr-claude-general` (or the session name shown in logs/status output).
 
 ---
 
@@ -145,9 +150,10 @@ Sessions are channel-scoped (one active per channel) and survive page refreshes.
 Status pills show a spinning border in each agent's color when that agent is actively working — so you can minimize the terminals and still know at a glance who's busy. Detection works by hashing the agent's terminal screen buffer every second: if anything changes (spinner, streaming text, tool output), the pill lights up. When the screen stops changing, it stops instantly. Cross-platform — Windows uses `ReadConsoleOutputW`, Mac/Linux uses `tmux capture-pane`.
 
 ### Multi-instance agents
-Run multiple instances of the same provider — double-click the launcher again and a second instance auto-registers with its own identity, color, status pill, and @mention routing. No configuration needed.
+Run multiple instances of the same provider by mentioning that provider in multiple channels, or by launching extra wrappers manually. Each instance auto-registers with its own identity, color, status pill, and @mention routing.
 
-- First Claude gets `claude`, second gets `claude-2`, third gets `claude-3`, etc.
+- Auto-started channel-scoped instances usually register as names like `claude-general` or `claude-debug`
+- Manually started extra wrappers fall back to slot-based names like `claude`, `claude-2`, `claude-3`
 - Each instance gets a shifted color variant so they're visually distinct but clearly related
 - Click a status pill to rename any instance (e.g. "claude-2" → "code-review")
 - When a second instance connects, a naming lightbox prompts you to give it a role name
@@ -302,28 +308,33 @@ claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
 }
 ```
 
-### Starting the server separately
+### Manual wrapper startup
 
-If you want to run the server without a launcher:
+The normal flow is:
+
+- Windows: start the server with `start.bat`, then launch the agent wrappers you want with the `windows/start_*.bat` scripts
+- Mac/Linux: start the server with `start.sh` and let it auto-start channel-scoped agents on first `@mention`
+
+If you want to bypass auto-start and run wrappers manually for debugging or custom setups:
 
 ```bash
-# Windows — Terminal 1: server only
+# Windows — server only
 windows\start.bat
 
-# Mac/Linux — Terminal 1: server only
+# Mac/Linux — server only
 ./macos-linux/start.sh
 
 # Mac/Linux — server only, but auto-started agents use skip/bypass modes
 ./macos-linux/start.sh --skip-permissions
 
-# Terminal 2 — agent wrapper (any platform)
+# Agent wrapper (any platform)
 python wrapper.py claude
 
-# With auto-approve (flags pass through after --)
-python wrapper.py claude -- --dangerously-skip-permissions
+# Detached wrapper with an explicit channel/session
+python wrapper.py claude --detached --channel general --session-name agentchattr-claude-general
 ```
 
-On Mac/Linux, `start.sh` prefers a tmux-backed `agentchattr-server` session when `tmux` is installed and falls back to `nohup` otherwise.
+You can still use the compatibility scripts in `windows/` and `macos-linux/` to launch a specific agent directly, but they are no longer the primary startup path.
 
 ### Configuration
 
@@ -333,6 +344,7 @@ Edit `config.toml` to customize agents, ports, and routing:
 [server]
 port = 8300                 # web UI port
 host = "127.0.0.1"
+allowed_origins = []        # optional extra browser origins, e.g. ["https://chat.example.ts.net"]
 
 [agents.claude]
 command = "claude"          # CLI command (must be on PATH)
@@ -467,6 +479,7 @@ agentchattr is designed for **localhost use only** and includes several protecti
 - **Session token** — a random token is generated on each server start and injected into the web UI. All API and WebSocket requests must present this token.
 - **Loopback-only registration** — agent registration, deregistration, and heartbeat endpoints only accept connections from localhost, preventing remote agent impersonation.
 - **Origin checking** — the server rejects requests from origins that don't match `localhost` / `127.0.0.1`, preventing cross-origin and DNS rebinding attacks.
+- **Explicit origin allowlist** — when you intentionally expose the UI through a trusted reverse proxy or Tailscale URL, set `[server].allowed_origins` to the exact public origin (or a tight host glob such as `https://*.ts.net`).
 - **No `shell=True`** — subprocess calls avoid shell injection by passing argument lists directly.
 - **Network binding warning** — if the server is configured to bind to a non-localhost address, it refuses to start unless you explicitly pass `--allow-network`.
 
