@@ -453,10 +453,16 @@ def configure(cfg: dict, session_token: str = ""):
                 for flag in _data_dir.glob("*_recovered"):
                     agent_name = flag.read_text("utf-8").strip()
                     flag.unlink()
+                    channel = "general"
+                    if channel_bindings:
+                        bound_channel = channel_bindings.find_channel_for_instance(agent_name, registry)
+                        if bound_channel:
+                            channel = bound_channel
                     store.add(
                         "system",
                         f"Agent routing for {agent_name} interrupted — auto-recovered. "
-                        "If agents aren't responding, try sending your message again."
+                        "If agents aren't responding, try sending your message again.",
+                        channel=channel,
                     )
             except Exception:
                 pass

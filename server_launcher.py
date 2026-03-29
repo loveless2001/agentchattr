@@ -110,20 +110,44 @@ class ServerLauncher:
     def _log_path(self, agent_name: str) -> Path:
         return self._logs_dir / f"{agent_name}.log"
 
-    def kill_session(self, session_name: str):
-        """Kill a wrapper process and its tmux session."""
-        # Kill wrapper processes matching this session name
+    def _wrapper_pids(self, session_name: str) -> list[str]:
         try:
             result = subprocess.run(
                 ["pgrep", "-f", f"--session-name {session_name}"],
                 capture_output=True, text=True,
             )
-            for pid in result.stdout.strip().split("\n"):
-                pid = pid.strip()
-                if pid:
-                    subprocess.run(["kill", pid], capture_output=True)
         except Exception:
-            pass
+            return []
+        if result.returncode not in (0, 1):
+            return []
+        return [pid.strip() for pid in result.stdout.splitlines() if pid.strip()]
+
+    def kill_session(self, session_name: str):
+        """Kill a wrapper process and its tmux session."""
+        # Stop wrapper processes matching this session name first so detached
+        # wrappers do not interpret the tmux session teardown as a crash and
+        # restart themselves before /sleep completes.
+        pids = self._wrapper_pids(session_name)
+        for pid in pids:
+            try:
+                subprocess.run(["kill", pid], capture_output=True)
+            except Exception:
+                pass
+
+        deadline = time.time() + 2.0
+        while pids and time.time() < deadline:
+            time.sleep(0.1)
+            pids = [
+                pid for pid in pids
+                if subprocess.run(["ps", "-p", pid], capture_output=True).returncode == 0
+            ]
+
+        for pid in pids:
+            try:
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+            except Exception:
+                pass
+
         # Kill tmux session
         try:
             subprocess.run(

@@ -66,6 +66,20 @@ class ChannelBindings:
             return canonical
         return None
 
+    def find_channel_for_instance(self, instance: str, registry=None) -> str | None:
+        with self._lock:
+            items = list(self._bindings.items())
+
+        for channel, mapping in items:
+            for bound in mapping.values():
+                if bound == instance:
+                    return channel
+                if registry:
+                    canonical = registry.resolve_name(bound)
+                    if canonical == instance:
+                        return channel
+        return None
+
     def rename_channel(self, old_name: str, new_name: str):
         with self._lock:
             if old_name not in self._bindings:
