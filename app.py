@@ -32,8 +32,10 @@ from session_engine import SessionEngine
 from server_launcher import ServerLauncher
 from attachment_processor import process_upload
 from channel_bindings import ChannelBindings
+from download_links import DownloadLinkService
 
 log = logging.getLogger(__name__)
+ROOT = Path(__file__).parent
 
 app = FastAPI(title="agentchattr")
 
@@ -50,6 +52,7 @@ session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 launcher: ServerLauncher | None = None
 channel_bindings: ChannelBindings | None = None
+download_links: DownloadLinkService | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
 
@@ -218,6 +221,15 @@ def _clean_attachments(raw_attachments) -> list[dict]:
     return cleaned
 
 
+def _decorate_message_for_client(msg: dict) -> dict:
+    if download_links:
+        try:
+            return download_links.decorate_message(msg)
+        except Exception:
+            log.exception("download link decoration failed")
+    return msg
+
+
 # --- Security middleware ---
 # Paths that don't require the session token (public assets).
 _PUBLIC_PREFIXES = ("/", "/static/")
@@ -304,10 +316,11 @@ def _install_security_middleware(token: str, cfg: dict):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
 
-            # Static assets, index page, and uploaded attachments are public.
+            # Static assets, index page, uploaded attachments, and ephemeral
+            # download tokens are public.
             # The index page injects the token client-side via same-origin script.
-            # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
+            # Uploads/downloads use random filenames or tokens plus path checks.
+            if path == "/" or path.startswith(("/static/", "/uploads/", "/downloads/", "/api/roles")):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -354,7 +367,7 @@ def _install_security_middleware(token: str, cfg: dict):
 
 def configure(cfg: dict, session_token: str = ""):
     global store, rules, summaries, jobs, schedules, router, agents, registry
-    global session_store, session_engine, launcher, channel_bindings, config
+    global session_store, session_engine, launcher, channel_bindings, download_links, config
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -372,6 +385,7 @@ def configure(cfg: dict, session_token: str = ""):
     # Initialize store upload dir from config
     raw_upload_dir = cfg.get("images", {}).get("upload_dir", "./uploads")
     store.upload_dir = Path(raw_upload_dir)
+    download_links = DownloadLinkService(cfg, ROOT)
     
     # Rules store — migrates from legacy decisions.json automatically
     rules_path = Path(data_dir) / "rules.json"
@@ -414,7 +428,6 @@ def configure(cfg: dict, session_token: str = ""):
     agents = AgentTrigger(registry, data_dir=data_dir)
 
     # Sessions
-    ROOT = Path(__file__).parent
     session_store = SessionStore(
         str(Path(data_dir) / "session_runs.json"),
         templates_dir=str(ROOT / "session_templates"),
@@ -1340,7 +1353,7 @@ async def _broadcast(raw_json: str):
 
 
 async def broadcast(msg: dict):
-    data = json.dumps({"type": "message", "data": msg})
+    data = json.dumps({"type": "message", "data": _decorate_message_for_client(msg)})
     dead = set()
     for client in list(ws_clients):
         try:
@@ -1570,7 +1583,7 @@ async def websocket_endpoint(websocket: WebSocket):
     history.sort(key=lambda m: m.get("timestamp", 0))
 
     for msg in history:
-        await websocket.send_text(json.dumps({"type": "message", "data": msg}))
+        await websocket.send_text(json.dumps({"type": "message", "data": _decorate_message_for_client(msg)}))
     for item in history_state:
         await websocket.send_text(json.dumps({"type": "history_state", "data": item}))
 
@@ -1958,8 +1971,8 @@ async def upload_image(file: UploadFile = File(...)):
 async def get_messages(since_id: int = 0, limit: int = 50, channel: str = ""):
     ch = channel if channel else None
     if since_id:
-        return store.get_since(since_id, channel=ch)
-    return store.get_recent(limit, channel=ch)
+        return [_decorate_message_for_client(msg) for msg in store.get_since(since_id, channel=ch)]
+    return [_decorate_message_for_client(msg) for msg in store.get_recent(limit, channel=ch)]
 
 
 @app.get("/api/messages/page")
@@ -1971,7 +1984,27 @@ async def get_messages_page(before_id: int, channel: str = "general", limit: int
     has_more = bool(
         messages and store.get_before(oldest_loaded_id, limit=1, channel=ch)
     )
-    return {"messages": messages, "has_more": has_more}
+    return {
+        "messages": [_decorate_message_for_client(msg) for msg in messages],
+        "has_more": has_more,
+    }
+
+
+@app.get("/api/downloads/debug/{msg_id}")
+async def debug_message_downloads(msg_id: int):
+    msg = store.get_by_id(msg_id)
+    if not msg:
+        return JSONResponse({"error": "message not found"}, status_code=404)
+    if not download_links:
+        return JSONResponse({"error": "downloads disabled"}, status_code=404)
+    debug = download_links.debug_text(str(msg.get("text") or ""))
+    debug.update({
+        "message_id": msg_id,
+        "sender": msg.get("sender", ""),
+        "channel": msg.get("channel", "general"),
+        "type": msg.get("type", "chat"),
+    })
+    return debug
 
 
 @app.post("/api/send")
@@ -1997,7 +2030,7 @@ async def api_send(request: Request):
     channel = body.get("channel", "general")
 
     msg = store.add(sender, text, channel=channel)
-    return JSONResponse(msg)
+    return JSONResponse(_decorate_message_for_client(msg))
 
 
 @app.get("/api/status")
@@ -2139,7 +2172,7 @@ async def demote_proposal(msg_id: int):
     updated = store.update_message(msg_id, updated_fields)
     if updated:
         # Broadcast the updated message to all clients
-        payload = json.dumps({"type": "edit", "message": updated})
+        payload = json.dumps({"type": "edit", "message": _decorate_message_for_client(updated)})
         dead = set()
         for client in list(ws_clients):
             try:
@@ -2147,7 +2180,7 @@ async def demote_proposal(msg_id: int):
             except Exception:
                 dead.add(client)
         ws_clients.difference_update(dead)
-    return updated or {"ok": True}
+    return _decorate_message_for_client(updated) if updated else {"ok": True}
 
 
 @app.post("/api/messages/{msg_id}/resolve_rule_proposal")
@@ -2178,7 +2211,7 @@ async def resolve_rule_proposal(msg_id: int, request: Request):
     updated = store.update_message(msg_id, {"metadata": meta})
     if updated:
         # Broadcast the updated message so all clients re-render the card
-        payload = json.dumps({"type": "edit", "message": updated})
+        payload = json.dumps({"type": "edit", "message": _decorate_message_for_client(updated)})
         dead = set()
         for client in list(ws_clients):
             try:
@@ -2186,7 +2219,7 @@ async def resolve_rule_proposal(msg_id: int, request: Request):
             except Exception:
                 dead.add(client)
         ws_clients.difference_update(dead)
-    return updated or {"ok": True}
+    return _decorate_message_for_client(updated) if updated else {"ok": True}
 
 
 @app.post("/api/messages/{msg_id}/demote_rule_proposal")
@@ -2208,7 +2241,7 @@ async def demote_rule_proposal(msg_id: int):
         "metadata": {},
     })
     if updated:
-        payload = json.dumps({"type": "edit", "message": updated})
+        payload = json.dumps({"type": "edit", "message": _decorate_message_for_client(updated)})
         dead = set()
         for client in list(ws_clients):
             try:
@@ -2216,7 +2249,7 @@ async def demote_rule_proposal(msg_id: int):
             except Exception:
                 dead.add(client)
         ws_clients.difference_update(dead)
-    return updated or {"ok": True}
+    return _decorate_message_for_client(updated) if updated else {"ok": True}
 
 
 @app.post("/api/trigger-agent")
@@ -3033,3 +3066,19 @@ async def serve_upload(filename: str, download: int = 0):
             headers["Content-Disposition"] = f'attachment; filename="{filepath.name}"'
         return FileResponse(filepath, media_type=media_type, headers=headers)
     return JSONResponse({"error": "not found"}, status_code=404)
+
+
+@app.get("/downloads/{token}")
+async def serve_download(token: str):
+    if not download_links:
+        return JSONResponse({"error": "downloads disabled"}, status_code=404)
+    item = download_links.resolve_token(token)
+    if not item:
+        return JSONResponse({"error": "download link expired or not found"}, status_code=404)
+    safe_filename = str(item["filename"]).replace('"', "")
+    headers = {"Content-Disposition": f'attachment; filename="{safe_filename}"'}
+    return FileResponse(
+        item["path"],
+        media_type=item.get("content_type") or "application/octet-stream",
+        headers=headers,
+    )

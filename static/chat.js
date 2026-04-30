@@ -423,6 +423,39 @@ function renderAttachmentListHtml(attachments, className) {
     return `<div class="${className}">${attachments.map(renderAttachmentHtml).join('')}</div>`;
 }
 
+function formatDownloadExpiry(download) {
+    const expiresAt = Number(download?.expires_at || 0);
+    if (!expiresAt) return '';
+    const remaining = Math.max(0, Math.round(expiresAt - Date.now() / 1000));
+    if (remaining < 60) return `${remaining}s left`;
+    return `${Math.ceil(remaining / 60)}m left`;
+}
+
+function renderDownloadListHtml(downloads) {
+    if (!downloads || downloads.length === 0) return '';
+    const countLabel = downloads.length === 1 ? '1 download' : `${downloads.length} downloads`;
+    const items = downloads.map(download => {
+        const name = escapeHtml(download.name || 'download');
+        const url = escapeHtml(download.url || '#');
+        const subtitleParts = [];
+        if (download.content_type) subtitleParts.push(download.content_type);
+        if (download.size_bytes) subtitleParts.push(formatBytes(download.size_bytes));
+        const expiry = formatDownloadExpiry(download);
+        if (expiry) subtitleParts.push(expiry);
+        return `<div class="download-item">
+            <div class="attachment-info">
+                <div class="attachment-name" title="${name}">${name}</div>
+                ${subtitleParts.length ? `<div class="attachment-subtitle">${escapeHtml(subtitleParts.join(' · '))}</div>` : ''}
+            </div>
+            <a class="attachment-link" href="${url}" download>download</a>
+        </div>`;
+    }).join('');
+    return `<details class="msg-downloads">
+        <summary>${countLabel}</summary>
+        <div class="download-list">${items}</div>
+    </details>`;
+}
+
 function renderAttachmentPreviewHtml(att, index, removeFnName) {
     const removeHtml = `<button class="remove-btn" onclick="${removeFnName}(${index})">x</button>`;
     if (isInlineImageAttachment(att)) {
@@ -433,6 +466,25 @@ function renderAttachmentPreviewHtml(att, index, removeFnName) {
 
 window.serializeAttachment = serializeAttachment;
 window.renderAttachmentListHtml = renderAttachmentListHtml;
+
+async function debugMessageDownloads(msgId) {
+    const el = document.querySelector(`.message[data-id="${msgId}"]`);
+    const rendered = Array.from(el?.querySelectorAll('.msg-downloads .download-item') || []).map(item => ({
+        name: item.querySelector('.attachment-name')?.textContent || '',
+        href: item.querySelector('a')?.href || '',
+    }));
+    const resp = await fetch(`/api/downloads/debug/${msgId}`, {
+        headers: { 'X-Session-Token': SESSION_TOKEN },
+    });
+    const data = await resp.json();
+    console.group(`agentchattr downloads debug #${msgId}`);
+    console.log('rendered', rendered);
+    console.log('server', data);
+    console.groupEnd();
+    return { rendered, server: data };
+}
+
+window.debugMessageDownloads = debugMessageDownloads;
 window.renderAttachmentPreviewHtml = renderAttachmentPreviewHtml;
 window.uploadAttachment = uploadAttachment;
 
@@ -1033,6 +1085,7 @@ function appendMessage(msg, opts = {}) {
         el.classList.add(isSelf ? 'self' : 'other');
 
         const attachmentsHtml = renderAttachmentListHtml(msg.attachments, 'msg-attachments');
+        const downloadsHtml = renderDownloadListHtml(msg.metadata?.downloads);
 
         const todoStatus = todos[msg.id] || null;
 
@@ -1059,7 +1112,7 @@ function appendMessage(msg, opts = {}) {
         const senderRole = _agentRoles[msg.sender] || '';
         const roleClass = senderRole ? 'bubble-role has-role' : 'bubble-role';
         const rolePillHtml = !isSelf ? `<button class="${roleClass}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}')" title="${senderRole ? escapeHtml(senderRole) : 'Set role'}">${senderRole || 'choose a role'}</button>` : '';
-        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${attachmentsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
+        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${attachmentsHtml}${downloadsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
         if (todoStatus) el.classList.add('msg-todo', `msg-todo-${todoStatus}`);
         if (msg.metadata?.session_output) el.classList.add('session-output');
 

@@ -2586,6 +2586,45 @@ main#timeline {
     text-decoration: underline;
 }
 
+.msg-downloads {
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-elevated);
+}
+
+.msg-downloads summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 8px 10px;
+    user-select: none;
+}
+
+.msg-downloads[open] summary {
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.download-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px 10px;
+}
+
+.download-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+}
+
+.download-item .attachment-link {
+    flex-shrink: 0;
+}
+
 /* --- Typing indicator --- */
 
 #typing-indicator {

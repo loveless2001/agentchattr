@@ -13,6 +13,7 @@ This repository is a fork of the original project: [bcurts/agentchattr](https://
 If you want the baseline version, start there. This branch currently carries additional work on top of upstream `main`, including:
 
 - file attachments with inline previews, upload cards, and a security scanner
+- ephemeral local file download links for agent-mentioned artifacts
 - persistent channel-to-agent instance bindings for multi-instance setups, allowing true parallelism, increasing cache hits and preserving context
 - simplified startup: one server script, background agent auto-spawn on first `@mention`, and WSL LAN helpers
 - responsive UI refinements and pagination for visible channel history
@@ -118,6 +119,11 @@ Bounded work conversations — like Slack threads with status tracking. When a t
 When an agent is triggered with a job, it sees the full job context — title, status, and conversation history — so it can pick up exactly where the last agent left off. Jobs are visible regardless of which channel you're in.
 
 Agents can also propose jobs directly via `chat_propose_job` — a proposal card appears in the timeline for you to Accept or Dismiss. The jobs panel opens from the header. Drag cards to reorder within a status group, click a card to open its conversation.
+
+### Ephemeral file downloads
+When an agent mentions an existing local file path, agentchattr can expose it as a short-lived download link in a collapsed box under the message. The original message text is left unchanged; download cards are generated server-side when messages are sent to the browser.
+
+Links are random bearer URLs under `/downloads/{token}`. They expire after 5 minutes by default, get extra lifetime for larger files, and are regenerated when history is loaded again. The parser accepts absolute paths, `~/...`, `./...`, `../...`, and slash-containing project-relative artifact paths such as `plans/reports/output.zip`. Bare project-relative paths are resolved from the server repo and one child directory under each `[downloads].allowed_roots`, which lets agent project paths work when the chat server itself runs from `agentchattr/`. Only regular files under `[downloads].allowed_roots` are eligible, and sensitive filename patterns such as `.env`, private keys, credentials, and secrets are excluded by default.
 
 ### Agent roles
 Assign roles to agents to steer their behavior — Planner, Builder, Reviewer, Researcher, or any custom role. Roles aren't a hard constraint — they're a persistent nudge. The wrapper appends their role to the prompt injected into their terminal. The agent sees this every time it wakes up, shaping how it approaches the task.
@@ -372,6 +378,14 @@ max_agent_hops = 4          # pause after N agent-to-agent messages
 [mcp]
 http_port = 8200            # MCP streamable-http (Claude Code, Codex)
 sse_port = 8201             # MCP SSE transport (Gemini)
+
+[downloads]
+enabled = true
+allowed_roots = [".."]      # roots eligible for agent-mentioned file links
+base_ttl_seconds = 300      # 5 minute base lifetime
+extra_ttl_per_10mb_seconds = 60
+max_file_mb = 512
+max_links_per_message = 8
 ```
 
 ### API agents (local models)
@@ -436,6 +450,7 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 | `run.py` | Entry point — starts MCP + web server |
 | `app.py` | FastAPI WebSocket server, REST endpoints, registration API, security middleware |
 | `store.py` | JSONL message persistence with observer callbacks |
+| `download_links.py` | Ephemeral local file path scanner and download token service |
 | `registry.py` | Runtime agent registry — slot assignment, identity claims, rename tracking |
 | `jobs.py` | Job store — JSON persistence, status tracking, threaded conversations |
 | `rules.py` | Rule store — JSON persistence, propose/activate/draft/archive/delete with epoch tracking |
@@ -481,6 +496,7 @@ agentchattr is designed for **localhost use only** and includes several protecti
 - **Loopback-only registration** — agent registration, deregistration, and heartbeat endpoints only accept connections from localhost, preventing remote agent impersonation.
 - **Origin checking** — the server rejects requests from origins that don't match `localhost` / `127.0.0.1`, preventing cross-origin and DNS rebinding attacks.
 - **Explicit origin allowlist** — when you intentionally expose the UI through a trusted reverse proxy or Tailscale URL, set `[server].allowed_origins` to the exact public origin (or a tight host glob such as `https://*.ts.net`).
+- **Download allowlist** — ephemeral file links are minted only for files under `[downloads].allowed_roots`; keep this list tight when using LAN mode.
 - **No `shell=True`** — subprocess calls avoid shell injection by passing argument lists directly.
 - **Network binding warning** — if the server is configured to bind to a non-localhost address, it refuses to start unless you explicitly pass `--allow-network`.
 
