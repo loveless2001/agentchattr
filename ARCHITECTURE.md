@@ -730,7 +730,3 @@ These points are implementation ambiguities worth confirming with maintainers:
 - Channel deletion removes the channel from settings and kills channel terminals
   but intentionally does not delete persisted history. `MessageStore.delete_channel()`
   exists but is not used by the current WebSocket delete-channel flow.
-- `mcp_proxy.py` stamps sender identity for most tools, but `_SENDER_PARAMS` does
-  not include newer tools such as `chat_summary` and `chat_propose_job`. Direct
-  bearer auth still resolves identity server-side, but proxy-only behavior should
-  be verified if those tools are used by a client that omits sender fields.

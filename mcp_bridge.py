@@ -9,7 +9,9 @@ import json
 import os
 import time
 import logging
+import shutil
 import threading
+import uuid
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -36,6 +38,7 @@ _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → las
 _cursors_lock = threading.Lock()
 _empty_read_count: dict[str, int] = {}  # sender → consecutive empty reads
 PRESENCE_TIMEOUT = 10  # ~2 missed heartbeats (5s interval) = offline
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 # Roles — per-instance, persisted to roles.json
 _roles: dict[str, str] = {}  # agent_name → role string
@@ -221,20 +224,10 @@ def chat_send(
         # Handle image attachment for job messages
         job_attachments = None
         if image_path:
-            import shutil, uuid
-            src = Path(image_path)
-            if not src.exists():
-                return f"Image not found: {image_path}"
-            if src.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'):
-                return f"Unsupported image type: {src.suffix}"
-            raw_dir = "./uploads"
-            if config and "images" in config:
-                raw_dir = config["images"].get("upload_dir", raw_dir)
-            upload_dir = Path(raw_dir)
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"{uuid.uuid4().hex[:8]}{src.suffix}"
-            shutil.copy2(str(src), str(upload_dir / filename))
-            job_attachments = [{"name": src.name, "url": f"/uploads/{filename}"}]
+            attachment, error = _copy_image_attachment(image_path)
+            if error:
+                return error
+            job_attachments = [attachment]
         msg = jobs.add_message(job_id, sender, text, msg_type=msg_type,
                                attachments=job_attachments)
         if msg is None:
@@ -270,25 +263,10 @@ def chat_send(
 
     attachments = []
     if image_path:
-        import shutil
-        import uuid
-        from pathlib import Path
-        src = Path(image_path)
-        if not src.exists():
-            return f"Image not found: {image_path}"
-        if src.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'):
-            return f"Unsupported image type: {src.suffix}"
-        
-        # Get upload dir from config (fall back to ./uploads)
-        raw_dir = "./uploads"
-        if config and "images" in config:
-            raw_dir = config["images"].get("upload_dir", raw_dir)
-        upload_dir = Path(raw_dir)
-        
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{uuid.uuid4().hex[:8]}{src.suffix}"
-        shutil.copy2(str(src), str(upload_dir / filename))
-        attachments.append({"name": src.name, "url": f"/uploads/{filename}"})
+        attachment, error = _copy_image_attachment(image_path)
+        if error:
+            return error
+        attachments.append(attachment)
 
     reply_id = reply_to if reply_to >= 0 else None
     if reply_id is not None and store.get_by_id(reply_id) is None:
@@ -338,6 +316,27 @@ def chat_propose_job(
     return f"Proposed job (msg_id={msg['id']}): {title}"
 
 
+def _configured_upload_dir() -> Path:
+    raw_dir = "./uploads"
+    if config and "images" in config:
+        raw_dir = config["images"].get("upload_dir", raw_dir)
+    return Path(raw_dir)
+
+
+def _copy_image_attachment(image_path: str) -> tuple[dict | None, str | None]:
+    src = Path(image_path)
+    if not src.exists():
+        return None, f"Image not found: {image_path}"
+    if src.suffix.lower() not in IMAGE_SUFFIXES:
+        return None, f"Unsupported image type: {src.suffix}"
+
+    upload_dir = _configured_upload_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex[:8]}{src.suffix}"
+    shutil.copy2(str(src), str(upload_dir / filename))
+    return {"name": src.name, "url": f"/uploads/{filename}"}, None
+
+
 def _resolve_upload_path(url: str, upload_dir: Path) -> str | None:
     if not url:
         return None
@@ -352,10 +351,7 @@ def _resolve_attachments(attachments: list[dict]) -> list[dict]:
     """Add absolute file paths so agents can consume normalized attachments."""
     if not attachments:
         return attachments
-    raw_dir = "./uploads"
-    if config and "images" in config:
-        raw_dir = config["images"].get("upload_dir", raw_dir)
-    upload_dir = Path(raw_dir).resolve()
+    upload_dir = _configured_upload_dir().resolve()
     resolved = []
     for att in attachments:
         a = dict(att)
@@ -666,7 +662,8 @@ def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -
     # Block unregistered agent names (stale identity from resumed session)
     if registry and registry.is_agent_family(name) and not registry.is_registered(name):
         return f"Error: '{name}' is not registered. Call chat_claim(sender=your_base_name) to get your identity."
-    store.add(name, f"{name} is online", msg_type="join", channel="general")
+    join_channel = (channel or "general").strip() or "general"
+    store.add(name, f"{name} is online", msg_type="join", channel=join_channel)
     online = _get_online()
     return f"Joined. Online: {', '.join(online)}"
 
@@ -775,10 +772,18 @@ def chat_decision(
     sender: str,
     decision: str = "",
     reason: str = "",
+    channel: str = "general",
     ctx: Context | None = None,
 ) -> str:
     """Backward-compatible alias for chat_rules. Use chat_rules instead."""
-    return chat_rules(action=action, sender=sender, rule=decision, reason=reason, ctx=ctx)
+    return chat_rules(
+        action=action,
+        sender=sender,
+        rule=decision,
+        reason=reason,
+        channel=channel,
+        ctx=ctx,
+    )
 
 
 # --- Server instances ---
