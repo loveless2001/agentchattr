@@ -16,6 +16,7 @@ build/
 .idea/
 .gemini/
 .claude/
+.codex
 tests/
 agents_lineup.svg
 docs/
