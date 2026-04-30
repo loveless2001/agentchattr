@@ -93,11 +93,6 @@ def main():
     )
 
     from config_loader import load_config
-    config_path = ROOT / "config.toml"
-    if not config_path.exists():
-        print(f"Error: {config_path} not found")
-        sys.exit(1)
-
     config = load_config(ROOT)
 
     # --- Security: generate a random session token (in-memory only) ---

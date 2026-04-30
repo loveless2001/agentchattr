@@ -53,8 +53,9 @@ Important entry points:
 
 ## Configuration
 
-`config_loader.py` loads `config.toml` and optionally merges
-`config.local.toml`.
+`config_loader.py` loads local `config.toml` and optionally merges
+`config.local.toml`. If `config.toml` is missing, it is created from the
+tracked `config.toml.example` template.
 
 Only the `[agents]` section is merged from `config.local.toml`; local entries are
 added only if they do not override built-in agent names. This prevents local
@@ -72,9 +73,11 @@ Main `config.toml` sections:
   agents, including enablement, allowlisted roots, token lifetime, max file
   size, and max links per message.
 
-The checked-in config binds the web server to `0.0.0.0`. `run.py` treats any
+The example config binds the web server to `0.0.0.0`. `run.py` treats any
 non-localhost host as risky and requires `--allow-network` plus confirmation.
-Launcher scripts set confirmation automatically for convenience.
+Launcher scripts set confirmation automatically for convenience. The generated
+local `config.toml` is ignored so machine-specific origins, ports, and agent
+settings do not get committed.
 
 ## Server Initialization
 

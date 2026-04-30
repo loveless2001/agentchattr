@@ -2,6 +2,7 @@
 port = 8300
 host = "0.0.0.0"
 data_dir = "./data"
+allowed_origins = []
 
 # Add agents here. Each gets a status pill, @mention routing, and color.
 # "cwd" is the working directory for the agent's terminal session.
@@ -44,15 +45,25 @@ sse_port = 8201
 upload_dir = "./uploads"
 max_size_mb = 10
 
+[downloads]
+enabled = true
+# Paths printed by agents are linkified only when the resolved file is under
+# one of these roots. Paths are relative to this config file's directory.
+allowed_roots = [".."]
+base_ttl_seconds = 300
+extra_ttl_per_10mb_seconds = 60
+max_file_mb = 512
+max_links_per_message = 8
+
 # --- MCP injection modes ---
 # By default, claude/codex/gemini/kimi use built-in MCP config injection.
 # For other CLI agents, set mcp_inject to tell the wrapper how to inject auth:
 #
 # mcp_inject modes:
-#   "settings_file" — write a JSON settings file at mcp_settings_path (merges, not overwrites)
-#   "env"           — write a settings file, expose path via mcp_env_var
-#   "flag"          — write a config file, pass via CLI flag (mcp_flag, default: --mcp-config)
-#   "proxy_flag"    — start a local proxy, pass URL via CLI flag template
+#   "settings_file" - write a JSON settings file at mcp_settings_path (merges, not overwrites)
+#   "env"           - write a settings file, expose path via mcp_env_var
+#   "flag"          - write a config file, pass via CLI flag (mcp_flag, default: --mcp-config)
+#   "proxy_flag"    - start a local proxy, pass URL via CLI flag template
 #
 # Example: Qwen Code CLI
 #   [agents.qwen]

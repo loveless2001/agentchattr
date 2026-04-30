@@ -345,6 +345,13 @@ You can still use the compatibility scripts in `windows/` and `macos-linux/` to 
 
 ### Configuration
 
+`config.toml` is local-only and gitignored. On first start, agentchattr creates
+it from `config.toml.example`; you can also create it manually:
+
+```bash
+cp config.toml.example config.toml
+```
+
 Edit `config.toml` to customize agents, ports, and routing:
 
 ```toml
@@ -466,7 +473,8 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 | `wrapper.py` | Cross-platform dispatcher — registration, auto-trigger, heartbeat, activity monitor |
 | `wrapper_windows.py` | Windows: keystroke injection + screen buffer activity detection |
 | `wrapper_unix.py` | Mac/Linux: tmux keystroke injection + pane capture activity detection |
-| `config.toml` | All configuration (agents, ports, routing) |
+| `config.toml.example` | Default configuration template |
+| `config.toml` | Local ignored configuration (agents, ports, routing) |
 | `windows/start_*_yolo/bypass.bat` | Auto-approve launchers (Windows) |
 | `macos-linux/start_*_yolo/bypass.sh` | Auto-approve launchers (Mac/Linux) |
 
