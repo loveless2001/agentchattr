@@ -853,6 +853,7 @@ function connectWebSocket() {
                 channelHistoryState[event.new_name] = channelHistoryState[event.old_name];
                 delete channelHistoryState[event.old_name];
             }
+            refreshChannelStatus();
         } else if (event.type === 'edit') {
             // A message was edited/demoted — re-render it in place
             const updatedMsg = event.message;
@@ -1231,6 +1232,7 @@ function applyAgentConfig(data) {
     buildStatusPills();
     buildMentionToggles();
     buildSoundSettings();
+    refreshChannelStatus();
     // Re-color any messages already rendered (e.g. from a reconnect)
     recolorMessages();
     updateJobReplyTargetUI();
@@ -1675,6 +1677,7 @@ function _setRole(agentName, role) {
 // --- Status ---
 
 const _agentRoles = {};  // name → role string
+let _latestStatusData = null;
 
 function fetchRoles() {
     fetch('/api/roles').then(r => r.json()).then(roles => {
@@ -1691,8 +1694,12 @@ const _ROLE_EMOJI = {
 };
 
 function updateStatus(data) {
-    for (const [name, info] of Object.entries(data)) {
-        if (name === 'paused') continue;
+    _latestStatusData = data || {};
+    const channelStatus = _latestStatusData._channels?.[activeChannel] || {};
+    const mergedStatus = { ..._latestStatusData, ...channelStatus };
+
+    for (const [name, info] of Object.entries(mergedStatus)) {
+        if (name === 'paused' || name === '_channels') continue;
         const pill = document.getElementById(`status-${name}`);
         if (!pill) continue;
 
@@ -1710,6 +1717,8 @@ function updateStatus(data) {
 
         // Keep agent color in sync
         if (info.color) pill.style.setProperty('--agent-color', info.color);
+        if (info.target) pill.title = `@${name} (${info.target} in #${activeChannel})`;
+        else pill.title = `@${name} (#${activeChannel})`;
 
         // Track role (displayed on bubbles, not on pill)
         if (info.role !== undefined) {
@@ -1718,6 +1727,12 @@ function updateStatus(data) {
         }
     }
 }
+
+function refreshChannelStatus() {
+    if (_latestStatusData) updateStatus(_latestStatusData);
+}
+
+window.refreshChannelStatus = refreshChannelStatus;
 
 function updateTyping(agent, active) {
     const indicator = document.getElementById('typing-indicator');

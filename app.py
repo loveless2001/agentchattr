@@ -230,6 +230,62 @@ def _decorate_message_for_client(msg: dict) -> dict:
     return msg
 
 
+def _channel_base_status(channel: str) -> dict:
+    """Return base-agent status as resolved for a specific channel."""
+    if not registry:
+        return {}
+
+    import mcp_bridge
+
+    result: dict[str, dict] = {}
+    bases = registry.get_bases()
+    for base, cfg in bases.items():
+        target = None
+        channel_name = f"{base}-{channel}"
+        if registry.get_instance(channel_name):
+            target = registry.resolve_name(channel_name)
+        if not target and channel_bindings:
+            target = channel_bindings.resolve(channel, base, registry)
+        if not target and registry.get_instance(base):
+            target = registry.resolve_name(base)
+
+        result[base] = {
+            "available": bool(target and mcp_bridge.is_online(target)),
+            "busy": bool(target and mcp_bridge.is_active(target)),
+            "label": cfg.get("label", base.capitalize()),
+            "color": cfg.get("color", "#888"),
+            "role": mcp_bridge.get_role(target or base),
+            "target": target or "",
+        }
+    return result
+
+
+def _status_payload() -> dict:
+    status = agents.get_status()
+    status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
+    status["_channels"] = {
+        ch: _channel_base_status(ch)
+        for ch in room_settings.get("channels", ["general"])
+    }
+    return status
+
+
+def _channel_for_agent_instance(name: str) -> str:
+    """Resolve the channel an agent instance belongs to."""
+    if channel_bindings:
+        bound_channel = channel_bindings.find_channel_for_instance(name, registry)
+        if bound_channel:
+            return bound_channel
+    if registry:
+        inst = registry.get_instance(name)
+        base = inst.get("base") if inst else None
+        if base and name.startswith(f"{base}-"):
+            suffix = name[len(base) + 1:]
+            if suffix in room_settings.get("channels", ["general"]):
+                return suffix
+    return "general"
+
+
 # --- Security middleware ---
 # Paths that don't require the session token (public assets).
 _PUBLIC_PREFIXES = ("/", "/static/")
@@ -466,11 +522,7 @@ def configure(cfg: dict, session_token: str = ""):
                 for flag in _data_dir.glob("*_recovered"):
                     agent_name = flag.read_text("utf-8").strip()
                     flag.unlink()
-                    channel = "general"
-                    if channel_bindings:
-                        bound_channel = channel_bindings.find_channel_for_instance(agent_name, registry)
-                        if bound_channel:
-                            channel = bound_channel
+                    channel = _channel_for_agent_instance(agent_name)
                     store.add(
                         "system",
                         f"Agent routing for {agent_name} interrupted — auto-recovered. "
@@ -526,9 +578,8 @@ def configure(cfg: dict, session_token: str = ""):
                                         "new_name": renamed["new"],
                                     })
                                     asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
-                            channels = room_settings.get("channels", ["general"])
-                            for ch in channels:
-                                store.add(name, f"{name} disconnected (timeout)", msg_type="leave", channel=ch)
+                            channel = _channel_for_agent_instance(name)
+                            store.add(name, f"{name} disconnected (timeout)", msg_type="leave", channel=channel)
                             _posted_leave.add(name)
 
                 # Re-fetch registered names (may have changed from crash timeout above)
@@ -550,9 +601,8 @@ def configure(cfg: dict, session_token: str = ""):
                     # Post leave message ONCE per offline transition (debounced)
                     if name not in _posted_leave:
                         _posted_leave.add(name)
-                        channels = room_settings.get("channels", ["general"])
-                        for ch in channels:
-                            store.add(name, f"{name} disconnected", msg_type="leave", channel=ch)
+                        channel = _channel_for_agent_instance(name)
+                        store.add(name, f"{name} disconnected", msg_type="leave", channel=channel)
 
                 # Clear leave debounce for agents that came back online
                 _posted_leave -= currently_online
@@ -569,9 +619,8 @@ def configure(cfg: dict, session_token: str = ""):
                         continue
                     if not registry.is_registered(name) and name not in _posted_leave:
                         _posted_leave.add(name)
-                        channels = room_settings.get("channels", ["general"])
-                        for ch in channels:
-                            store.add(name, f"{name} disconnected", msg_type="leave", channel=ch)
+                        channel = _channel_for_agent_instance(name)
+                        store.add(name, f"{name} disconnected", msg_type="leave", channel=channel)
 
                 if _known_online != currently_online and _event_loop:
                     asyncio.run_coroutine_threadsafe(broadcast_status(), _event_loop)
@@ -1364,8 +1413,7 @@ async def broadcast(msg: dict):
 
 
 async def broadcast_status():
-    status = agents.get_status()
-    status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
+    status = _status_payload()
     data = json.dumps({"type": "status", "data": status})
     dead = set()
     for client in list(ws_clients):
@@ -2035,9 +2083,7 @@ async def api_send(request: Request):
 
 @app.get("/api/status")
 async def get_status():
-    status = agents.get_status()
-    status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
-    return status
+    return _status_payload()
 
 
 @app.get("/api/settings")
@@ -2684,7 +2730,18 @@ async def heartbeat(agent_name: str, request: Request):
         # (handles case where _renames was cleared by server restart but
         # the instance was claimed/renamed via MCP)
         if not inst:
+            if channel_bindings:
+                for channel in room_settings.get("channels", ["general"]):
+                    for base in config.get("agents", {}):
+                        bound = channel_bindings.resolve(channel, base, registry)
+                        if bound == current_name:
+                            inst = registry.get_instance(bound)
+                            canonical = bound
+                            break
+                    if inst:
+                        break
             base = current_name.split("-")[0] if "-" in current_name else current_name
+        if not inst:
             family_inst = registry.get_family_instance(base)
             if family_inst:
                 inst = family_inst
