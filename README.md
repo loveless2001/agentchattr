@@ -239,7 +239,7 @@ Dark-themed chat at `localhost:8300` with real-time updates:
 - Date dividers between different days
 - Configurable history limit per channel
 - Auto-linked URLs (no longer double-wraps URLs inside existing links)
-- Configurable name, font (mono/sans), and high contrast mode
+- Configurable name, font (mono/sans), high contrast mode, and Ctrl+Enter-only sending
 - Auto-saving settings (no Save button needed)
 - Agent status pills (online/working/offline) with animated activity indicators
 - Drag-scroll on overflowing pill bars and mention toggles

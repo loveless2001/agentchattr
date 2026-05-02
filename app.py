@@ -67,6 +67,7 @@ room_settings: dict = {
     "channels": ["general"],
     "history_limit": 50,
     "contrast": "normal",
+    "ctrl_enter_to_send": False,
 }
 
 # Channel validation
@@ -155,6 +156,7 @@ def _load_settings():
     room_settings["history_limit"] = _coerce_history_limit(
         room_settings.get("history_limit", DEFAULT_HISTORY_PAGE_SIZE)
     )
+    room_settings["ctrl_enter_to_send"] = room_settings.get("ctrl_enter_to_send") is True
 
 
 def _save_settings():
@@ -1843,6 +1845,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         pass
                 if "contrast" in new and new["contrast"] in ("normal", "high"):
                     room_settings["contrast"] = new["contrast"]
+                if "ctrl_enter_to_send" in new:
+                    room_settings["ctrl_enter_to_send"] = new["ctrl_enter_to_send"] is True
                 if "rules_refresh_interval" in new:
                     try:
                         ri = int(new["rules_refresh_interval"])

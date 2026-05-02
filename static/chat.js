@@ -20,6 +20,7 @@ let lastMessageDate = null;  // track date for dividers (general channel)
 let lastMessageDates = {};  // { channel: dateString } for per-channel dividers
 let soundEnabled = false;  // suppress sounds during initial history load
 let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
+let ctrlEnterToSend = false;
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
 let agentHats = {};  // { agent_name: svg_string }
@@ -41,6 +42,7 @@ Object.defineProperty(window, 'username', { get() { return username; } });
 Object.defineProperty(window, 'agentConfig', { get() { return agentConfig; } });
 Object.defineProperty(window, 'ws', { get() { return ws; } });
 Object.defineProperty(window, 'soundEnabled', { get() { return soundEnabled; } });
+Object.defineProperty(window, 'ctrlEnterToSend', { get() { return ctrlEnterToSend; } });
 Object.defineProperty(window, 'rules', { get() { return rules; }, set(v) { rules = v; } });
 Object.defineProperty(window, 'autoScroll', { get() { return autoScroll; } });
 Object.defineProperty(window, '_lastMentionedAgent', {
@@ -1777,6 +1779,12 @@ function applySettings(data) {
         document.body.classList.toggle('high-contrast', data.contrast === 'high');
         document.getElementById('setting-contrast').value = data.contrast;
     }
+    if (data.ctrl_enter_to_send !== undefined) {
+        ctrlEnterToSend = data.ctrl_enter_to_send === true;
+        const checkbox = document.getElementById('setting-ctrl-enter-send');
+        if (checkbox) checkbox.checked = ctrlEnterToSend;
+        updateSendKeyHint();
+    }
     if (data.rules_refresh_interval !== undefined) {
         document.getElementById('setting-rules-refresh').value = String(data.rules_refresh_interval);
     }
@@ -1829,7 +1837,11 @@ function saveSettings() {
     const newHops = document.getElementById('setting-hops').value;
     const newHistory = parseInt(document.getElementById('setting-history').value, 10) || DEFAULT_HISTORY_PAGE_SIZE;
     const newContrast = document.getElementById('setting-contrast').value;
+    const newCtrlEnterToSend = document.getElementById('setting-ctrl-enter-send').checked;
     const newRulesRefresh = document.getElementById('setting-rules-refresh').value;
+
+    ctrlEnterToSend = newCtrlEnterToSend;
+    updateSendKeyHint();
 
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
@@ -1840,6 +1852,7 @@ function saveSettings() {
                 max_agent_hops: parseInt(newHops) || 4,
                 history_limit: newHistory,
                 contrast: newContrast,
+                ctrl_enter_to_send: newCtrlEnterToSend,
                 rules_refresh_interval: parseInt(newRulesRefresh) || 0,
             }
         }));
@@ -1878,6 +1891,22 @@ function setupSettingsKeys() {
             }
         });
     }
+
+    const ctrlEnter = document.getElementById('setting-ctrl-enter-send');
+    ctrlEnter.addEventListener('change', () => saveSettings());
+    ctrlEnter.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            toggleSettings();
+        }
+    });
+}
+
+function updateSendKeyHint() {
+    const hint = document.getElementById('send-key-hint');
+    if (!hint) return;
+    hint.innerHTML = ctrlEnterToSend
+        ? 'Ctrl+Enter to send &middot; Enter for newline'
+        : 'Enter to send &middot; Shift+Enter for newline';
 }
 
 // --- Keyboard shortcuts ---
@@ -2094,6 +2123,13 @@ function setupInput() {
         if (mentionMenuVisible) {
             const menu = document.getElementById('mention-menu');
             const items = menu.querySelectorAll('.mention-item');
+            if (e.key === 'Enter' && e.ctrlKey && ctrlEnterToSend) {
+                e.preventDefault();
+                menu.classList.add('hidden');
+                mentionMenuVisible = false;
+                sendMessage();
+                return;
+            }
             if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 mentionMenuIndex = (mentionMenuIndex - 1 + items.length) % items.length;
@@ -2139,7 +2175,7 @@ function setupInput() {
                 e.preventDefault();
                 const active = items[slashMenuIndex];
                 if (active) selectSlashCommand(active.querySelector('.slash-cmd').textContent);
-                if (e.key === 'Enter') sendMessage();
+                if (e.key === 'Enter' && (!ctrlEnterToSend || e.ctrlKey)) sendMessage();
                 return;
             }
             if (e.key === 'Escape') {
@@ -2148,7 +2184,7 @@ function setupInput() {
                 return;
             }
         }
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && !e.shiftKey && (!ctrlEnterToSend || e.ctrlKey)) {
             e.preventDefault();
             sendMessage();
         }

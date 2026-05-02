@@ -156,7 +156,7 @@ Then it accepts browser events:
 - `todo_add`, `todo_toggle`, `todo_remove`: manage pinned/todo state.
 - rule events: propose, activate, deactivate, edit, delete, remind.
 - `update_settings`: update room title, username, font, contrast, history
-  limit, loop guard, and rule refresh interval.
+  limit, loop guard, Ctrl+Enter-only sending, and rule refresh interval.
 - `rename_agent` and `name_pending`: human-managed instance identity changes.
 - `channel_create`, `channel_rename`, `channel_delete`: channel management.
 

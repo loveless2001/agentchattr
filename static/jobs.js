@@ -203,7 +203,7 @@ function setupJobsInput() {
     if (!input) return;
     const attachmentInput = document.getElementById('job-attachment-input');
     input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey && !jobMentionVisible) {
+        if (e.key === 'Enter' && !e.shiftKey && !jobMentionVisible && (!window.ctrlEnterToSend || e.ctrlKey)) {
             e.preventDefault();
             sendJobMessage();
             return;
@@ -1961,6 +1961,13 @@ function setupJobMentions() {
         if (jobMentionVisible) {
             const menu = document.getElementById('job-mention-menu');
             const items = menu.querySelectorAll('.mention-item');
+            if (e.key === 'Enter' && e.ctrlKey && window.ctrlEnterToSend) {
+                e.preventDefault();
+                menu.classList.add('hidden');
+                jobMentionVisible = false;
+                sendJobMessage();
+                return;
+            }
             if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 jobMentionIndex = (jobMentionIndex - 1 + items.length) % items.length;

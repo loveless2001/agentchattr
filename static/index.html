@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>agentchattr</title>
-    <link rel="stylesheet" href="/static/style.css?v=225">
+    <link rel="stylesheet" href="/static/style.css?v=227">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=224">
     <link rel="icon" href="/static/favicon.ico">
@@ -102,6 +102,12 @@
                     <option value="normal">Normal</option>
                     <option value="high">High</option>
                 </select>
+            </div>
+            <div class="settings-field">
+                <label class="settings-check" for="setting-ctrl-enter-send">
+                    <input type="checkbox" id="setting-ctrl-enter-send">
+                    <span>Ctrl+Enter to send</span>
+                </label>
             </div>
             <div class="settings-field">
                 <label for="setting-rules-refresh">Rule refresh</label>
@@ -343,7 +349,7 @@
                 </div>
             </div>
             <div class="input-hint">
-                Enter to send &middot; Shift+Enter for newline &middot; Upload or drop files &middot; Mic for voice
+                <span id="send-key-hint">Enter to send &middot; Shift+Enter for newline</span> &middot; Upload or drop files &middot; Mic for voice
                 &middot; Type / or @ for autocomplete
             </div>
         </footer>
@@ -357,10 +363,10 @@
     <script src="/static/core.js?v=223"></script>
     <script src="/static/store.js?v=223"></script>
     <script src="/static/sessions.js?v=223"></script>
-    <script src="/static/jobs.js?v=223"></script>
+    <script src="/static/jobs.js?v=227"></script>
     <script src="/static/channels.js?v=226"></script>
     <script src="/static/rules-panel.js?v=223"></script>
-    <script src="/static/chat.js?v=226"></script>
+    <script src="/static/chat.js?v=227"></script>
 </body>
 
 </html>

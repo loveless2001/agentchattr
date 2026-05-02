@@ -456,6 +456,13 @@ header h1 {
     width: 60px;
 }
 
+.settings-field input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: var(--accent);
+}
+
 .settings-field select {
     width: 130px;
 }
@@ -468,6 +475,13 @@ header h1 {
 .settings-field input:disabled {
     opacity: 0.35;
     pointer-events: none;
+}
+
+.settings-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
 }
 
 /* --- Sound settings --- */
