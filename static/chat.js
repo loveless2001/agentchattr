@@ -1954,8 +1954,6 @@ const SLASH_COMMANDS = [
     { cmd: '/poetry haiku', desc: 'Agents write a haiku about the codebase', broadcast: true },
     { cmd: '/poetry limerick', desc: 'Agents write a limerick about the codebase', broadcast: true },
     { cmd: '/poetry sonnet', desc: 'Agents write a sonnet about the codebase', broadcast: true },
-    { cmd: '/summary', desc: 'Summarize recent messages — tag an agent (e.g. /summary @claude)', broadcast: false, needsMention: true },
-    { cmd: '/summarise', desc: 'Summarize recent messages — tag an agent (e.g. /summarise @claude)', broadcast: false, needsMention: true, hidden: true },
     { cmd: '/continue', desc: 'Resume after loop guard pauses', broadcast: false },
     { cmd: '/compact', desc: 'Send native /compact to active channel CLIs', broadcast: false },
     { cmd: '/sleep', desc: 'Stop auto-started agent terminals for this channel', broadcast: false },
@@ -2226,7 +2224,7 @@ function sendMessage() {
         }
         // Commands that need an @mention — show hint and keep command in input
         if (matchedCmd && matchedCmd.needsMention && !/@\w/.test(text)) {
-            const canonical = matchedCmd.cmd.split(/\s/)[0];  // e.g. '/summary'
+            const canonical = matchedCmd.cmd.split(/\s/)[0];
             input.value = canonical + ' @';
             input.focus();
             input.setSelectionRange(input.value.length, input.value.length);

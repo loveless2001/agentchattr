@@ -22,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from store import MessageStore
 from rules import RuleStore
 from summaries import SummaryStore
+from summary_compressor_worker import SummaryCompressor
 from jobs import JobStore
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
@@ -453,7 +454,14 @@ def configure(cfg: dict, session_token: str = ""):
     rules = RuleStore(str(rules_path))
     rules.on_change(_on_rule_change)
 
-    summaries = SummaryStore(str(Path(data_dir) / "summaries.json"))
+    # Channel summary tree: indexed from chat history, compressed in the
+    # background by a headless LLM CLI (see summaries.py).
+    summary_cfg = cfg.get("summaries", {})
+    summaries = SummaryStore(str(Path(data_dir) / "summaries"), store, summary_cfg)
+    store.on_message(summaries.on_message)
+    store.on_delete(summaries.on_delete)
+    summaries.active = bool(summary_cfg.get("enabled", True)) and SummaryCompressor(
+        summaries, Path(data_dir) / "summaries" / ".work", summary_cfg).start()
 
     # Migrate legacy activities.json → jobs.json
     jobs_path = Path(data_dir) / "jobs.json"
@@ -1079,6 +1087,11 @@ def _maybe_autostart_agent(target: str, channel: str) -> dict | None:
     if not launcher or not registry:
         return None
 
+    # An agent is about to work in this channel: make sure its summary tree
+    # exists (first time: backfills recent history in the background).
+    if summaries:
+        summaries.ensure(channel)
+
     bound = _resolve_bound_channel_agent(target, channel)
     if bound:
         return {
@@ -1660,6 +1673,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     cmd = cmd_parts[0].lower()
                     if cmd == "/clear":
                         store.clear(channel=channel)
+                        summaries.reset(channel)
                         await broadcast_clear(channel=channel)
                         continue
                     if cmd == "/continue":
@@ -1954,6 +1968,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 idx = room_settings["channels"].index(old_name)
                 room_settings["channels"][idx] = new_name
                 store.rename_channel(old_name, new_name)
+                summaries.rename(old_name, new_name)
                 if channel_bindings:
                     channel_bindings.rename_channel(old_name, new_name)
                 import mcp_bridge

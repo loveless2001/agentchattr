@@ -90,14 +90,13 @@ _MCP_INSTRUCTIONS = (
     "If the latest message in a channel is addressed to you (or all agents), treat it as your active task "
     "and execute it directly. Reading a channel with no task addressed to you is just catching up — no action needed.\n\n"
     "If chat_send rejects your sender with an identity error, call chat_claim(sender='your_base_name') to get your identity.\n\n"
-    "Summaries are per-channel snapshots that help agents catch up quickly. "
-    "Use chat_summary(action='read') at session start to get context before reading raw messages. "
-    "Use chat_summary(action='write', text='...') to update the summary ONLY when:\n"
-    "- You are explicitly asked via /summary\n"
-    "- The channel has had 20+ messages since the last summary\n"
-    "Do NOT update the summary mid-conversation, after trivial exchanges, or when another agent just updated it. "
-    "Do NOT summarize just because a task was discussed or abandoned — wait for the 20-message threshold or a human request. "
-    "Keep summaries factual and concise (under 150 words) — focus on decisions made, tasks completed, and open questions.\n\n"
+    "Channel summaries are written automatically in the background — never write or post summaries yourself. "
+    "Your first chat_read of a channel in a fresh session (and every chat_resync) starts with a summary of the "
+    "channel's history: older history compressed, recent history in more detail, each line tagged with a block id "
+    "like #120-151, followed by the latest messages. If your context was cleared or compacted, call "
+    "chat_resync(channel=...) to get it again. To dig deeper: chat_summary(action='zoom', block='120-151') expands "
+    "a line, chat_summary(action='zoom', block='<message id>') shows the messages around one message, and "
+    "chat_summary(action='recall', query='<regex>') searches the channel's raw history.\n\n"
     "Jobs are bounded work conversations — like Slack threads with status tracking. "
     "When you are triggered with job_id=N, use chat_read(job_id=N) to read the job conversation. "
     "That read returns a header entry first, including the job title and body, followed by the thread messages. "
@@ -534,6 +533,7 @@ def chat_read(
     - Pass since_id to override and read from a specific point.
     - Omit sender to always get the last `limit` messages (no cursor).
     - Pass channel to filter by channel name (default: all channels).
+    - The first read of a channel (no cursor yet) starts with the channel summary.
     - Pass job_id to read a specific job. Job reads return a header entry first,
       including title and body, followed by the thread messages."""
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
@@ -578,6 +578,7 @@ def chat_read(
         return json.dumps(out, ensure_ascii=False)
 
     ch = channel if channel else None
+    fresh = False
     if since_id:
         msgs = store.get_since(since_id, channel=ch)
     elif sender:
@@ -589,6 +590,7 @@ def chat_read(
             msgs = store.get_since(cursor, channel=ch)
         else:
             msgs = store.get_recent(limit, channel=ch)
+            fresh = True
     else:
         msgs = store.get_recent(limit, channel=ch)
 
@@ -611,6 +613,9 @@ def chat_read(
     elif sender:
         _empty_read_count[sender] = 0
 
+    if fresh and ch:
+        serialized = _with_summary_header(ch, serialized)
+
     # Prepend identity breadcrumb if multi-instance
     if sender and registry and registry.is_registered(sender):
         multi = registry.family_instance_count(sender) >= 2
@@ -631,7 +636,8 @@ def chat_resync(
     """Explicit full-context fetch.
 
     Returns the latest `limit` messages and resets the sender cursor
-    to the latest returned message id.
+    to the latest returned message id. With a channel, the messages are
+    preceded by the channel summary (use after /clear or compaction).
     Pass channel to filter by channel name (default: all channels).
     """
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
@@ -641,7 +647,19 @@ def chat_resync(
     msgs = store.get_recent(limit, channel=ch)
     _update_cursor(sender, msgs, ch)
     serialized = _serialize_messages(msgs)
-    return serialized
+    return _with_summary_header(ch, serialized) if ch else serialized
+
+
+def _with_summary_header(channel: str, body: str) -> str:
+    """Prefix a channel read with the channel's summary tree, if it has one."""
+    if not summaries:
+        return body
+    try:
+        header = summaries.render(channel)
+    except Exception:
+        log.exception("Failed to render summary for #%s", channel)
+        return body
+    return f"{header}\n{body}" if header else body
 
 
 def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -> str:
@@ -837,51 +855,40 @@ def chat_channels() -> str:
 
 def chat_summary(
     action: str,
-    sender: str,
-    text: str = "",
+    sender: str = "",
     channel: str = "",
+    block: str = "",
+    query: str = "",
     ctx: Context | None = None,
 ) -> str:
-    """Read or write per-channel summaries. Summaries help agents catch up quickly.
+    """Channel summary: an automatically maintained summary tree of a channel's
+    chat history (older history compressed, recent history in more detail).
 
     Actions:
-      - read: Get the current summary for a channel (default: sender's last active channel).
-      - write: Update the channel summary. Requires text (max 1000 chars).
+      - read: the channel summary; each line is tagged with a block id like #120-151.
+      - zoom: block='120-151' expands a summary line into its two halves, down to
+        the raw messages; block='137' shows the messages around message #137.
+      - recall: query='<regex>' searches the channel's raw messages (newest hits).
 
-    Keep summaries factual and concise (under 150 words). Focus on decisions made,
-    tasks completed, and open questions."""
-    sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
+    Summaries are written in the background; there is nothing to write or post."""
+    _, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
     if err:
         return err
+    if not summaries:
+        return "Error: summaries not available."
     action = action.strip().lower()
     channel = (channel or "general").strip()
 
     if action == "read":
-        entry = summaries.get(channel)
-        if not entry:
-            return json.dumps({"channel": channel, "text": None, "message": f"No summary for #{channel} yet — one hasn't been written."})
-        return json.dumps(entry, ensure_ascii=False)
-
-    if action == "write":
-        if not text.strip():
-            return "Error: text is required."
-        if len(text.strip()) > 1000:
-            return "Error: summary too long (max 1000 characters)."
-        # Get the latest message ID for staleness tracking
-        latest_id = 0
-        if store:
-            recent = store.get_recent(1, channel=channel)
-            if recent:
-                latest_id = recent[-1]["id"]
-        result = summaries.write(channel, text, sender, message_id=latest_id)
-        if result is None:
-            return "Error: failed to write summary."
-        # Post a visual summary message to the timeline
-        if store:
-            store.add(sender, text.strip(), msg_type="summary", channel=channel)
-        return f"Summary for #{channel} updated ({len(text.strip())} chars)."
-
-    return f"Unknown action: {action}. Valid actions: read, write."
+        if not summaries.active:
+            return "Channel summaries are disabled (or the summary CLI is not installed)."
+        return summaries.render(channel) or f"No summary for #{channel} yet — too few messages."
+    if action == "zoom":
+        return summaries.zoom(channel, block)
+    if action == "recall":
+        return summaries.recall(channel, query)
+    return (f"Unknown action: {action}. Valid actions: read, zoom, recall. "
+            "Summaries are written automatically; there is no write action.")
 
 
 _ALL_TOOLS = [

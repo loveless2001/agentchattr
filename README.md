@@ -195,9 +195,17 @@ Paste or drag-and-drop images in the web UI, or agents can attach local images v
 Click the mic button (Chrome/Edge) to dictate messages instead of typing. Useful for longer messages or when you want to talk to your agents like they're in the room with you.
 
 ### Channel summaries
-Per-channel snapshots that help agents catch up quickly. Instead of reading the full scrollback, agents call `chat_summary(action='read')` at session start to get a concise summary of what happened.
+Each channel keeps an automatic summary tree of its chat history, modeled on [OptMem](https://github.com/VictorTaelin/OptMem): every 16 chat messages are compressed into one line, and pairs of lines merge into a parent line, recursively. Nobody has to ask for a summary and nothing is posted to the timeline.
 
-Summaries are written by agents — either self-initiated when a significant discussion concludes, or triggered by a human via `/summary @agent`. The server enforces a 1000-character cap. Summaries persist across restarts in `summaries.json`.
+When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` — followed by the latest messages. From there the agent can dig in with `chat_summary`:
+
+- `action='zoom', block='120-151'` expands a line into its two halves, down to the raw messages
+- `action='zoom', block='137'` shows the messages around message #137
+- `action='recall', query='<regex>'` searches the channel's raw history
+
+A channel's tree is created the first time an agent starts in (or reads) it, backfilling up to `backfill_days` (default 30) of history. After that, new messages are compressed as they arrive. `/clear` resets the channel's tree; deleting a message recompresses the lines that contained it.
+
+The lines are written in the background by a headless CLI — by default `codex exec` with the `gpt-6-luna` model, read-only sandbox, no user config, no saved session. Configure it in the `[summaries]` section of `config.toml` (`command`, `backfill_days`, `read_lines`, `workers`, `enabled`). Trees are stored in `data/summaries/<channel>.json`.
 
 ### Scheduled messages
 Schedule one-shot or recurring messages from the split send button. Click the clock icon next to Send to open the schedule popover — pick a date/time for one-shot, or check Recurring and set an interval (minutes, hours, or days). Scheduled messages fire as real chat messages from you, complete with @mentions that trigger agents automatically.
@@ -209,7 +217,6 @@ The schedule popover validates that at least one agent is toggled before enablin
 ### Slash commands
 Type `/` in the input to open a Slack-style autocomplete menu:
 
-- `/summary @agent` — ask an agent to summarize recent messages in the current channel
 - `/continue` — resume after the loop guard pauses an agent-to-agent chain
 - `/compact` — send the native `/compact` command to active channel CLIs
 - `/clear` — clear messages in the current channel
@@ -274,7 +281,7 @@ The wrapper sends a heartbeat ping every 5 seconds to keep the agent marked as "
 When someone @mentions an offline agent, the message is still queued for delivery — the agent will pick it up when the wrapper next polls. A system notice ("X appears offline — message queued") lets you know the agent may not respond immediately.
 
 ### MCP tools
-Agents get 12 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_set_hat`, `chat_claim`, `chat_summary`, and `chat_propose_job`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Hats are SVG overlays on agent avatars — agents set them via `chat_set_hat`, humans can drag them to the trash to remove. Summaries are per-channel text snapshots — agents read and write them via `chat_summary` to help other agents catch up without reading the full scrollback. Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. Any MCP-compatible agent can participate — no special integration needed.
+Agents get 12 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_set_hat`, `chat_claim`, `chat_summary`, and `chat_propose_job`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Hats are SVG overlays on agent avatars — agents set them via `chat_set_hat`, humans can drag them to the trash to remove. Channel summaries are generated automatically — agents receive them on their first read of a channel and drill into them via `chat_summary` (read, zoom, recall). Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. Any MCP-compatible agent can participate — no special integration needed.
 
 Each agent instance gets its own MCP proxy (auto-assigned port) that injects the correct sender identity into all tool calls. This means agents don't need to know their own name — the proxy handles it transparently.
 
@@ -462,7 +469,10 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 | `jobs.py` | Job store — JSON persistence, status tracking, threaded conversations |
 | `rules.py` | Rule store — JSON persistence, propose/activate/draft/archive/delete with epoch tracking |
 | `schedules.py` | Schedule store — create/delete/toggle/run_due, interval parsing, JSON persistence |
-| `summaries.py` | Per-channel summary store — JSON persistence, read/write with 1000-char cap |
+| `summaries.py` | Per-channel summary tree — indexes chat history into blocks, compression job queue, JSON persistence |
+| `summary_tree_views.py` | Agent-facing summary text — fresh-read header, zoom, regex recall |
+| `summary_tree_layout.py` | Picks which tree nodes to show — coarse for old history, fine for recent |
+| `summary_compressor_worker.py` | Background workers writing summary lines with a headless CLI (Codex Luna by default) |
 | `session_engine.py` | Session orchestration — phase advancement, turn triggering, prompt assembly |
 | `session_store.py` | Session persistence — run state, template loading/validation, custom template storage |
 | `session_templates/` | Built-in session templates (JSON) — code review, debate, design critique, planning |

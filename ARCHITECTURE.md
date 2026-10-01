@@ -85,7 +85,7 @@ settings do not get committed.
 
 - `MessageStore` for JSONL chat persistence.
 - `RuleStore` for shared agent rules.
-- `SummaryStore` for per-channel summaries.
+- `SummaryStore` for per-channel summary trees, plus `SummaryCompressor` background workers.
 - `JobStore` for bounded job conversations.
 - `ScheduleStore` for recurring or one-shot scheduled prompts.
 - `RuntimeRegistry` for live agent instances.
@@ -334,7 +334,7 @@ Registered tools:
 - `chat_channels`: list channels.
 - `chat_set_hat`: set an agent avatar hat SVG.
 - `chat_claim`: confirm or reclaim an identity in multi-instance setups.
-- `chat_summary`: read or write per-channel summaries.
+- `chat_summary`: read, zoom into, or regex-search (`recall`) the channel summary tree.
 - `chat_propose_job`: post a job proposal card for human approval.
 
 Authentication and identity:
@@ -554,12 +554,41 @@ Schedules can be paused, resumed, deleted, recurring, or one-shot.
 
 ## Summaries
 
-`summaries.py` stores one summary per channel in `data/summaries.json`.
+Channel summaries are an OptMem-style tree over each channel's chat history.
 
-Agents use `chat_summary(action='read')` to catch up and
-`chat_summary(action='write')` to update a summary. Summaries are capped at
-1000 characters and include author, timestamp, and latest message ID at write
-time. Summary writes also post a timeline message of type `summary`.
+- `summaries.py` (`SummaryStore`) indexes visible `chat` messages into leaf
+  blocks of 16 messages and adds a parent block for every complete pair, per
+  level. Blocks are keyed by message-id ranges (leaves also keep their message
+  ids), so deletions never shift blocks. State lives in
+  `data/summaries/<channel>.json`; `text: null` marks a block that needs
+  (re)compression.
+- A channel is initialized lazily by `ensure()` — called when an agent is
+  auto-started in the channel and on an agent's first read — and backfills up
+  to `[summaries].backfill_days` of history. Initialized channels index new
+  messages through a `MessageStore.on_message` callback.
+- `summary_compressor_worker.py` (`SummaryCompressor`) runs worker threads that
+  claim jobs (lowest level first, newest block first), run the configured CLI
+  (default `codex exec -m gpt-6-luna`, read-only, `--ignore-user-config`,
+  `--ephemeral`) with the prompt on stdin, and store one line of at most 280
+  bytes. Failed jobs back off for 5 minutes; 3 consecutive failures pause all
+  compression (doubling up to 1 hour) so a logged-out or missing CLI is not
+  hammered. Workers log and survive any error. Nothing is posted to chat.
+- `summary_tree_layout.py` picks the nodes to show within `read_lines`:
+  coarse for old history, fine for recent. Nodes still being compressed render
+  as their children instead of blocking.
+- `summary_tree_views.py` renders the header, `zoom` (a block's halves, a
+  leaf's raw messages, or the messages around one message id) and `recall`
+  (regex over the channel's raw history, with the containing block id;
+  queries over 200 chars or with nested quantifiers like `(a+)+` are
+  rejected, since Python's `re` cannot time out).
+- `chat_read` prepends the header on an agent's first read of a channel (no
+  cursor yet); `chat_resync` always does.
+- `MessageStore.on_delete` marks the leaf containing a deleted message and
+  its ancestors stale; results computed from the old content mid-flight are
+  discarded. `/clear` resets the channel's tree, and channel rename moves it.
+
+Legacy `summary` timeline messages from the old manual `/summary` flow still
+render, but no new ones are created.
 
 ## Hats, Pins, Slash Commands, and Utility Features
 
@@ -646,7 +675,7 @@ Under `data_dir`, usually `./data`:
 - `settings.json`: room settings and channels.
 - `hats.json`: avatar hats.
 - `rules.json`: shared rules and epoch.
-- `summaries.json`: channel summaries.
+- `summaries/<channel>.json`: channel summary trees (the old `summaries.json` is no longer used).
 - `jobs.json`: jobs and job messages.
 - `schedules.json`: scheduled prompts.
 - `session_runs.json`: session run state.
