@@ -596,8 +596,8 @@ def chat_read(
         ch_key = ch if ch else "__all__"
         with _cursors_lock:
             agent_cursors = _cursors.get(sender, {})
-            cursor = agent_cursors.get(ch_key, 0)
-        if cursor:
+            cursor = agent_cursors.get(ch_key)
+        if cursor is not None:  # a cursor at message #0 is still a cursor
             msgs = store.get_since(cursor, channel=ch)
         else:
             msgs = store.get_recent(limit, channel=ch)
