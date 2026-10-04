@@ -17,6 +17,8 @@ If you want the baseline version, start there. This branch currently carries add
 - persistent channel-to-agent instance bindings for multi-instance setups, allowing true parallelism, increasing cache hits and preserving context
 - simplified startup: one server script, background agent auto-spawn on first `@mention`, and WSL LAN helpers
 - responsive UI refinements and pagination for visible channel history
+- automatic per-channel [summary trees](#channel-summaries) (OptChat-style, written in the background by Codex Luna): a fresh agent starts from a compact summary of the channel's history and zooms in on demand
+- a crash-safe chat log: rewrites are atomic, and a line torn by a crash mid-save is [repaired on load](#crash-safe-chat-log) instead of silently dropping messages
 
 *This is an example of what a conversation might look like if you really messed up.*
 
@@ -188,6 +190,9 @@ Open the pins panel (pin icon in the header) to see all pinned items — open on
 ### Message deletion
 Click **del** on any message to enter delete mode. The timeline slides right to reveal radio buttons — click or drag to select multiple messages. A confirmation bar slides up with the count. Hit **Delete** to confirm or **Cancel** / **Escape** to back out. Deletes messages from storage and cleans up any attached images.
 
+### Crash-safe chat log
+Messages are stored one per line in `data/agentchattr_log.jsonl`. Every rewrite (deletes, message updates, channel changes) writes a temp file and swaps it in, so a crash mid-rewrite cannot cut the log short. If the server dies mid-save and leaves a torn line, the next start recovers every complete message in it, keeps a copy of the damaged file (`agentchattr_log.jsonl.damaged-<time>`), and rewrites the log clean. The torn message itself is gone (the rest of it was never written), so a system notice in `#general` names it and points to the copy holding its partial text; its id is never reused.
+
 ### Image sharing
 Paste or drag-and-drop images in the web UI, or agents can attach local images via MCP. Images render inline and open in a lightbox modal when clicked.
 
@@ -197,13 +202,13 @@ Click the mic button (Chrome/Edge) to dictate messages instead of typing. Useful
 ### Channel summaries
 Each channel keeps an automatic summary tree of its chat history, modeled on [OptMem](https://github.com/VictorTaelin/OptMem) and its successor [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): every chat message becomes one line (a short message is kept word for word, a long one is compressed), and pairs of lines merge into a parent line, recursively (two lines that still fit in 512 bytes together are simply kept). Nobody has to ask for a summary and nothing is posted to the timeline.
 
-When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` (or `#137` for a single message) — followed by the latest messages. From there the agent can dig in with `chat_summary`:
+When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` (or `#137` for a single message) — followed by the latest messages. A newly registered instance always starts with no read cursors, so it gets the summary even when it reuses an earlier instance's name. From there the agent can dig in with `chat_summary`:
 
 - `action='zoom', block='120-151'` expands a line into its two halves, down to single messages
 - `action='zoom', block='137'` shows message #137 whole, with the messages around it
 - `action='recall', query='<regex>'` searches the channel's raw history
 
-A channel's tree is created the first time an agent starts in (or reads) it, backfilling up to `backfill_days` (default 30) of history. After that, new messages are compressed as they arrive. `/clear` resets the channel's tree; deleting a message rewrites the lines that contained it.
+A channel's tree is created the first time an agent starts in (or reads) it, backfilling up to `backfill_days` (default 30) of history. After that, new messages are compressed as they arrive. `/clear` resets the channel's tree; deleting a message rewrites the lines that contained it. On startup, a tree written by an older version of the summarizer, or whose messages no longer match the chat log (one lost to a crash, or restored by hand), is rebuilt in the background: lines that still cover the same messages are kept, and an outdated line stays visible to agents until its replacement is written.
 
 The lines are written in the background by a headless CLI — by default `codex exec` with the `gpt-6-luna` model, read-only sandbox, no user config, no saved session. The compressor prompt follows the [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449) spec: your own words rank first and stay close to verbatim, each item is tagged with its sender, lines are written oldest first with the summary so far as context, and a line aims at 512 bytes (retried with feedback when well over, never cut). Configure it in the `[summaries]` section of `config.toml` (`command`, `backfill_days`, `read_bytes`, `workers`, `enabled`). Trees are stored in `data/summaries/<channel>.json`.
 
@@ -271,6 +276,7 @@ agentchattr is designed to keep coordination lightweight:
 
 - `chat_read(sender=...)` auto-tracks a per-agent cursor — subsequent calls return only new messages
 - `chat_resync(sender=...)` gives an explicit full refresh when you actually need it
+- a fresh agent gets the [channel summary](#channel-summaries) instead of a raw history dump, and zooms into only the parts it needs
 - loop guard pauses long agent-to-agent chains and requires `/continue`
 - reply threading + targeted `@mentions` reduce irrelevant context fanout
 - compact MCP tool surface — minimizes system prompt overhead
@@ -463,7 +469,8 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 |------|---------|
 | `run.py` | Entry point — starts MCP + web server |
 | `app.py` | FastAPI WebSocket server, REST endpoints, registration API, security middleware |
-| `store.py` | JSONL message persistence with observer callbacks |
+| `store.py` | JSONL message persistence with observer callbacks, atomic rewrites |
+| `chat_log_repair.py` | Loads the chat log defensively — recovers messages from crash-torn lines, backs up the damaged file |
 | `download_links.py` | Ephemeral local file path scanner and download token service |
 | `registry.py` | Runtime agent registry — slot assignment, identity claims, rename tracking |
 | `jobs.py` | Job store — JSON persistence, status tracking, threaded conversations |
