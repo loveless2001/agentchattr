@@ -371,6 +371,8 @@ Edit `config.toml` to customize agents, ports, and routing:
 [server]
 port = 8300                 # web UI port
 host = "127.0.0.1"
+log_max_mb = 50             # cap on data/server.log; oldest lines are dropped first (0 = no cap)
+log_level = "info"          # "debug" also logs agent heartbeats (hidden by default)
 allowed_origins = []        # optional extra browser origins, e.g. ["https://chat.example.ts.net"]
 
 [agents.claude]
@@ -468,6 +470,7 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 | File | Purpose |
 |------|---------|
 | `run.py` | Entry point — starts MCP + web server |
+| `server_log_trimmer.py` | Caps the server log at `log_max_mb`, dropping the oldest lines in place (macOS/Linux) |
 | `app.py` | FastAPI WebSocket server, REST endpoints, registration API, security middleware |
 | `store.py` | JSONL message persistence with observer callbacks, atomic rewrites |
 | `chat_log_repair.py` | Loads the chat log defensively — recovers messages from crash-torn lines, backs up the damaged file |

@@ -2,6 +2,8 @@
 port = 8300
 host = "0.0.0.0"
 data_dir = "./data"
+log_max_mb = 50  # cap on the server log (data/server.log); oldest lines are dropped first, 0 = no cap
+log_level = "info"  # "debug" also logs agent heartbeats (one per agent every 5 s)
 allowed_origins = []
 
 # Add agents here. Each gets a status pill, @mention routing, and color.

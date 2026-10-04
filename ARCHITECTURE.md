@@ -34,6 +34,15 @@ Runtime services:
 - MCP SSE server on `mcp.sse_port`, default `8201`.
 - Background threads for wrapper recovery, presence/activity expiry, crash
   deregistration, and scheduled messages.
+- A log trimmer thread (`server_log_trimmer.py`) that keeps the file the
+  launcher redirects the server's output to (`data/server.log`) under
+  `server.log_max_mb` (default 50, 0 = off): over the cap, the oldest lines
+  are dropped in place, keeping the newest 3/4 of the cap. It turns on
+  O_APPEND for the server's stdout/stderr first, so a `>` redirect cannot
+  leave a zero-filled hole. Checked every 10 s; no cap on Windows (no fcntl).
+- `server.log_level` (default `info`) sets the server's log level. Agent
+  heartbeat requests (one per agent every 5 s) are access-logged at DEBUG by
+  `run.HeartbeatAccessFilter`, so they show only at `debug`.
 
 Important entry points:
 

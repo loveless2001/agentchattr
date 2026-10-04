@@ -16,6 +16,20 @@ sys.path.insert(0, str(ROOT))
 
 log = logging.getLogger(__name__)
 
+LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+
+
+class HeartbeatAccessFilter(logging.Filter):
+    """Agent heartbeats (one per agent every 5 s, ~99% of access lines) are
+    logged at DEBUG, so they show only with [server] log_level = "debug"."""
+
+    def filter(self, record):
+        args = record.args  # uvicorn: (client, method, path, http_version, status)
+        if isinstance(args, tuple) and len(args) > 2 and str(args[2]).startswith("/api/heartbeat/"):
+            record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+            return logging.getLogger("uvicorn.access").isEnabledFor(logging.DEBUG)
+        return True
+
 
 def _venv_python_path() -> Path:
     if sys.platform == "win32":
@@ -94,6 +108,16 @@ def main():
 
     from config_loader import load_config
     config = load_config(ROOT)
+
+    log_level = str(config.get("server", {}).get("log_level", "info")).lower()
+    if log_level not in LOG_LEVELS:
+        log.warning("Unknown [server] log_level %r; using 'info'", log_level)
+        log_level = "info"
+    logging.getLogger().setLevel(log_level.upper())
+
+    # Cap the log file the launcher redirects our output to (oldest lines go first)
+    import server_log_trimmer
+    server_log_trimmer.start(config.get("server", {}))
 
     # --- Security: generate a random session token (in-memory only) ---
     session_token = secrets.token_hex(32)
@@ -225,7 +249,8 @@ def main():
     print(f"  Agents auto-trigger on @mention")
     print(f"\n  Session token: {session_token}\n")
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    logging.getLogger("uvicorn.access").addFilter(HeartbeatAccessFilter())
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 if __name__ == "__main__":
     main()
