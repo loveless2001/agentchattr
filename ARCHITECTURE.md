@@ -347,7 +347,8 @@ Authentication and identity:
 - Base family names are rejected when authentication is required or when
   multiple active instances would make sender identity ambiguous.
 
-`chat_read` uses persisted cursors in `data/mcp_cursors.json`. First read returns
+`chat_read` uses persisted cursors in `data/mcp_cursors.json`, cleared when an
+instance registers (a new instance has an empty context). First read returns
 recent context; later reads return new messages since the last cursor. Repeated
 empty reads return increasingly explicit anti-polling hints.
 

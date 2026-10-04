@@ -492,6 +492,16 @@ def purge_identity(name: str):
     _save_cursors()
 
 
+def reset_cursors(name: str):
+    """Forget an agent's read cursors: a newly registered instance has an empty
+    context, so its first read of each channel must start fresh (with the
+    channel summary) instead of resuming where an earlier instance stopped."""
+    with _cursors_lock:
+        if _cursors.pop(name, None) is None:
+            return
+    _save_cursors()
+
+
 def migrate_cursors_rename(old_name: str, new_name: str):
     """Move cursor entries from old channel name to new channel name."""
     with _cursors_lock:

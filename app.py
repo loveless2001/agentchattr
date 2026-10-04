@@ -2625,6 +2625,9 @@ async def register_agent(request: Request):
                 "new_name": renamed["new"],
             })
             asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
+    # A new instance starts with an empty context: its first read of each
+    # channel should include the channel summary, not resume an old cursor.
+    mcp_bridge.reset_cursors(result["name"])
     # Broadcast pending_instance event so UI can show naming lightbox
     if result.get("state") == "pending" and _event_loop:
         pending_event = json.dumps({
