@@ -20,6 +20,7 @@ SNIPPET_CHARS = 300    # recall snippet length
 NEIGHBOURS = 8         # messages shown on each side for block='<message id>'
 MAX_QUERY_CHARS = 200
 DELETED = "(message deleted)"  # the line of a deleted message's leaf
+PLACEHOLDER_BYTES = 512        # header budget charged for a line not written yet
 # A quantified group that itself contains a quantifier, e.g. (a+)+ or (\w+\s?)*:
 # the classic catastrophic-backtracking shape. Python's re has no timeout and
 # holds the GIL, so one such query could stall the whole server.
@@ -118,9 +119,15 @@ def render_header(channel: str, st: dict, store, read_bytes: int) -> str:
         f"chat_summary(action='recall', channel='{channel}', query='<regex>')]"
     ]
 
+    # A placeholder costs the line it stands for (about PLACEHOLDER_BYTES), not
+    # its few bytes of text: otherwise, while a tree is (re)built, cheap
+    # placeholders fill the budget and the fold never climbs to the written
+    # (or old) lines above them.
     def cost(k: int, j: int) -> tuple[int, bool]:
         block = levels[k][j]
-        return len(_part_line(k, block).encode()) + 1, bool(shown_text(block))
+        if not shown_text(block):
+            return PLACEHOLDER_BYTES, False
+        return len(_part_line(k, block).encode()) + 1, True
 
     lines += [_part_line(k, levels[k][j]) for k, j in fold(len(leaves), read_bytes, cost)]
     pending = sum(1 for level in levels for b in level if b["text"] is None)
