@@ -190,7 +190,17 @@ messages are archived into numbered JSONL files.
 
 Message deletion is destructive for selected message IDs. It rewrites the JSONL
 file, removes associated todos, and deletes uploaded attachment files referenced
-by deleted messages.
+by deleted messages. Every rewrite (delete, update, archive) writes a temp file
+and swaps it in, so a crash mid-rewrite cannot cut the log short.
+
+Loading (`chat_log_repair.py`) repairs a crash mid-append mechanically: a
+torn line, with the next message often glued onto it, has every complete
+message in it recovered; the damaged file is copied to
+`agentchattr_log.jsonl.damaged-<time>` and the log is rewritten clean. The
+torn message itself cannot be recovered (the rest of it was never written):
+it is listed in `MessageStore.load_problems`, its id is never reused, and a
+system notice in #general names it and points to the copy holding its
+partial text. A missing final newline is restored.
 
 ## Routing and Triggers
 
@@ -606,6 +616,9 @@ channel's chat history.
   rejected, since Python's `re` cannot time out).
 - `chat_read` prepends the header on an agent's first read of a channel (no
   cursor yet); `chat_resync` always does.
+- On load, a tree whose leaves no longer match the chat log (a message lost
+  to a torn line, or restored by hand) is rebuilt; nodes covering the same
+  messages keep their lines.
 - `MessageStore.on_delete` turns a deleted message's leaf into
   `(message deleted)` and marks its ancestors stale; results computed from
   the old content mid-flight are discarded. `/clear` resets the channel's tree, and channel rename moves it.

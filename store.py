@@ -13,6 +13,8 @@ import time
 import threading
 from pathlib import Path
 
+from chat_log_repair import load_chat_log
+
 log = logging.getLogger(__name__)
 
 # Archive when active JSONL exceeds this size (bytes). Default 5 MB.
@@ -33,29 +35,20 @@ class MessageStore:
         self._todo_callbacks: list = []  # called on todo changes
         self._delete_callbacks: list = []  # called on message deletion
         self.upload_dir = self._path.parent.parent / "uploads"  # Default fallback
+        # Torn fragments dropped at load (see chat_log_repair.py) and the copy
+        # of the damaged file that still holds them.
+        self.load_problems: list[dict] = []
+        self.load_backup: Path | None = None
         self._load()
         self._load_todos()
 
     def _load(self):
         if not self._path.exists():
             return
-        max_id = -1
-        with open(self._path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                    # Preserve persisted ID; fall back to line number for legacy data
-                    if "id" not in msg:
-                        msg["id"] = i
-                    if msg["id"] > max_id:
-                        max_id = msg["id"]
-                    self._messages.append(msg)
-                except json.JSONDecodeError:
-                    continue
-        self._next_id = max_id + 1
+        self._messages, self.load_problems, self._next_id, self.load_backup = \
+            load_chat_log(self._path)
+        if self.load_backup:  # damaged: keep what was recovered, drop the torn bytes
+            self._rewrite_jsonl()
 
     def on_message(self, callback):
         """Register a callback(msg) called whenever a message is added."""
@@ -248,12 +241,15 @@ class MessageStore:
             return None
 
     def _rewrite_jsonl(self):
-        """Rewrite the JSONL file from current in-memory messages."""
-        with open(self._path, "w", encoding="utf-8") as f:
+        """Rewrite the JSONL file from current in-memory messages, via a temp
+        file swapped in whole: a crash mid-rewrite must not cut the log short."""
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             for m in self._messages:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        os.replace(tmp, self._path)
 
     def clear(self, channel: str | None = None):
         """Insert a clear marker instead of deleting messages.

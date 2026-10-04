@@ -21,9 +21,11 @@ levels[0] holds leaves (lo == hi == the message id); levels[k + 1][j] merges
 levels[k][2j] and levels[k][2j + 1]. text=None means "needs (re)compression".
 Nodes are keyed by message ids, so deleting a message never shifts the tree:
 its leaf becomes the free line DELETED and its ancestors are rewritten.
-A tree written under another TREE_VERSION is rebuilt from the chat log on
-load; until a node is rewritten, agents still see the line an old node with
-the same id range had, as "old" (never used as compressor context).
+A tree is rebuilt from the chat log on load when it was written under
+another TREE_VERSION, or when its leaves no longer match the log (a message
+lost to a crash-torn line, or one restored by hand). Same-version lines whose
+node covers the same messages are kept; an older version's line is shown to
+agents as "old" until its node is rewritten (never used as compressor context).
 
 Lines are written in history order (OptChat's rule): a node is compressed only
 once every leaf before it has a line, so its compressor gets the summary up to
@@ -88,7 +90,7 @@ class SummaryStore:
                 continue
             if not (isinstance(raw, dict) and isinstance(raw.get("levels"), list)):
                 continue
-            if raw.get("version") == TREE_VERSION:
+            if raw.get("version") == TREE_VERSION and self._matches_log(path.stem, raw):
                 self._state[path.stem] = raw
                 continue
             try:
@@ -97,20 +99,48 @@ class SummaryStore:
                 log.exception("Could not rebuild summary tree %s; ignoring it", path)
                 self._state.pop(path.stem, None)
 
+    def _matches_log(self, channel: str, st: dict) -> bool:
+        """True when the tree's leaves are exactly the log's chat messages up to
+        its last leaf (deleted leaves aside): no message lost, none restored."""
+        leaves = st["levels"][0] if st["levels"] else []
+        if not leaves:
+            return True
+        last = leaves[-1]["hi"]
+        logged = {m["id"] for m in views.chat_only(
+            self._store.get_since(st["start_id"] - 1, channel=channel)) if m["id"] <= last}
+        return logged == {leaf["lo"] for leaf in leaves if leaf["text"] != views.DELETED}
+
     def _rebuild(self, channel: str, old: dict):
-        """Re-index a tree from another TREE_VERSION from the chat log. A new
-        node covering exactly the messages of an old node (e.g. a level-4 node
-        and an old 16-message leaf) shows the old line until it is rewritten."""
-        log.info("Summary tree #%s is from another version; rebuilding it", channel)
-        lines = {(b["lo"], b["hi"]): b.get("text") or b.get("old")
-                 for level in old["levels"] for b in level}
+        """Re-index a tree from the chat log. A new node at the same level and
+        id range as a node of the same TREE_VERSION covers the same messages,
+        so it keeps that line. Under another version, a new node covering
+        exactly an old node's messages (e.g. a level-4 node and an old
+        16-message leaf) shows the old line until it is rewritten."""
+        same = old.get("version") == TREE_VERSION
+        log.info("Summary tree #%s %s; rebuilding it", channel,
+                 "does not match the chat log" if same else "is from another version")
+        prev = {(k if same else None, b["lo"], b["hi"]): b
+                for k, level in enumerate(old["levels"]) for b in level}
         self._state[channel] = self._new_tree(int(old.get("start_id", 0)))
         self._sync(channel)
-        for level in self._state[channel]["levels"]:
-            for block in level:
-                line = lines.get((block["lo"], block["hi"]))
-                if line and block["text"] is None:
-                    block["old"] = line
+        levels = self._state[channel]["levels"]
+        # Messages deleted in the old tree but back in the log: lines written
+        # while they were gone must not be kept.
+        old_leaves = old["levels"][0] if same and old["levels"] else []
+        back = {leaf["lo"] for leaf in old_leaves if leaf["text"] == views.DELETED} & {
+            leaf["lo"] for leaf in (levels[0] if levels else [])}
+        for k, level in enumerate(levels):
+            for j, block in enumerate(level):
+                was = prev.get((k if same else None, block["lo"], block["hi"]))
+                if not was or block["text"] is not None:
+                    continue
+                if any(block["lo"] <= msg_id <= block["hi"] for msg_id in back):
+                    continue
+                if same and was["text"]:
+                    block["text"] = was["text"]
+                    _fill_free(levels, k, j)
+                elif was.get("text") or was.get("old"):
+                    block["old"] = was.get("text") or was.get("old")
         self._save(channel)
 
     @staticmethod

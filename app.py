@@ -424,6 +424,20 @@ def _install_security_middleware(token: str, cfg: dict):
     app.add_middleware(SecurityMiddleware)
 
 
+def _post_chat_log_damage_notice(log_path: Path):
+    """Tell the human, in #general, which messages a crash cut off: the log
+    was repaired at load (see chat_log_repair.py), but their text is gone
+    except for the partial copy kept in the backup."""
+    problems = store.load_problems
+    which = ", ".join(f"#{p['ids'][0]}" if p["ids"] else f"(line {p['line']})"
+                      for p in problems[:5]) + (", …" if len(problems) > 5 else "")
+    store.add("system",
+              f"A crash cut off {len(problems)} message(s) while they were being saved "
+              f"({which}); {log_path} was repaired without them. Their partial text is "
+              f"kept in {store.load_backup}.",
+              msg_type="system", channel="general")
+
+
 def configure(cfg: dict, session_token: str = ""):
     global store, rules, summaries, jobs, schedules, router, agents, registry
     global session_store, session_engine, launcher, channel_bindings, download_links, config
@@ -509,6 +523,8 @@ def configure(cfg: dict, session_token: str = ""):
 
     _load_settings()
     _load_hats()
+    if store.load_problems:
+        _post_chat_log_damage_notice(log_path)
 
     # Apply saved loop guard setting
     if "max_agent_hops" in room_settings:
