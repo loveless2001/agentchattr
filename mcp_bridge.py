@@ -95,8 +95,9 @@ _MCP_INSTRUCTIONS = (
     "channel's history: older history compressed, recent history in more detail, each line tagged with a block id "
     "like #120-151, followed by the latest messages. If your context was cleared or compacted, call "
     "chat_resync(channel=...) to get it again. To dig deeper: chat_summary(action='zoom', block='120-151') expands "
-    "a line, chat_summary(action='zoom', block='<message id>') shows the messages around one message, and "
-    "chat_summary(action='recall', query='<regex>') searches the channel's raw history.\n\n"
+    "a line, chat_summary(action='zoom', block='<message id>') shows one message whole with its neighbours, and "
+    "chat_summary(action='recall', query='<regex>') searches the channel's raw history. "
+    "Only messages posted to chat are remembered, so put lasting findings, decisions and results in your replies.\n\n"
     "Jobs are bounded work conversations — like Slack threads with status tracking. "
     "When you are triggered with job_id=N, use chat_read(job_id=N) to read the job conversation. "
     "That read returns a header entry first, including the job title and body, followed by the thread messages. "
@@ -867,7 +868,7 @@ def chat_summary(
     Actions:
       - read: the channel summary; each line is tagged with a block id like #120-151.
       - zoom: block='120-151' expands a summary line into its two halves, down to
-        the raw messages; block='137' shows the messages around message #137.
+        single messages; block='137' shows message #137 whole, with its neighbours.
       - recall: query='<regex>' searches the channel's raw messages (newest hits).
 
     Summaries are written in the background; there is nothing to write or post."""

@@ -461,7 +461,8 @@ def configure(cfg: dict, session_token: str = ""):
     store.on_message(summaries.on_message)
     store.on_delete(summaries.on_delete)
     summaries.active = bool(summary_cfg.get("enabled", True)) and SummaryCompressor(
-        summaries, Path(data_dir) / "summaries" / ".work", summary_cfg).start()
+        summaries, Path(data_dir) / "summaries" / ".work", summary_cfg,
+        human=lambda: room_settings.get("username", "user")).start()
 
     # Migrate legacy activities.json → jobs.json
     jobs_path = Path(data_dir) / "jobs.json"

@@ -195,17 +195,17 @@ Paste or drag-and-drop images in the web UI, or agents can attach local images v
 Click the mic button (Chrome/Edge) to dictate messages instead of typing. Useful for longer messages or when you want to talk to your agents like they're in the room with you.
 
 ### Channel summaries
-Each channel keeps an automatic summary tree of its chat history, modeled on [OptMem](https://github.com/VictorTaelin/OptMem): every 16 chat messages are compressed into one line, and pairs of lines merge into a parent line, recursively. Nobody has to ask for a summary and nothing is posted to the timeline.
+Each channel keeps an automatic summary tree of its chat history, modeled on [OptMem](https://github.com/VictorTaelin/OptMem) and its successor [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): every chat message becomes one line (a short message is kept word for word, a long one is compressed), and pairs of lines merge into a parent line, recursively (two lines that still fit in 512 bytes together are simply kept). Nobody has to ask for a summary and nothing is posted to the timeline.
 
-When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` — followed by the latest messages. From there the agent can dig in with `chat_summary`:
+When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` (or `#137` for a single message) — followed by the latest messages. From there the agent can dig in with `chat_summary`:
 
-- `action='zoom', block='120-151'` expands a line into its two halves, down to the raw messages
-- `action='zoom', block='137'` shows the messages around message #137
+- `action='zoom', block='120-151'` expands a line into its two halves, down to single messages
+- `action='zoom', block='137'` shows message #137 whole, with the messages around it
 - `action='recall', query='<regex>'` searches the channel's raw history
 
-A channel's tree is created the first time an agent starts in (or reads) it, backfilling up to `backfill_days` (default 30) of history. After that, new messages are compressed as they arrive. `/clear` resets the channel's tree; deleting a message recompresses the lines that contained it.
+A channel's tree is created the first time an agent starts in (or reads) it, backfilling up to `backfill_days` (default 30) of history. After that, new messages are compressed as they arrive. `/clear` resets the channel's tree; deleting a message rewrites the lines that contained it.
 
-The lines are written in the background by a headless CLI — by default `codex exec` with the `gpt-6-luna` model, read-only sandbox, no user config, no saved session. Configure it in the `[summaries]` section of `config.toml` (`command`, `backfill_days`, `read_lines`, `workers`, `enabled`). Trees are stored in `data/summaries/<channel>.json`.
+The lines are written in the background by a headless CLI — by default `codex exec` with the `gpt-6-luna` model, read-only sandbox, no user config, no saved session. The compressor prompt follows the [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449) spec: your own words rank first and stay close to verbatim, each item is tagged with its sender, lines are written oldest first with the summary so far as context, and a line aims at 512 bytes (retried with feedback when well over, never cut). Configure it in the `[summaries]` section of `config.toml` (`command`, `backfill_days`, `read_bytes`, `workers`, `enabled`). Trees are stored in `data/summaries/<channel>.json`.
 
 ### Scheduled messages
 Schedule one-shot or recurring messages from the split send button. Click the clock icon next to Send to open the schedule popover — pick a date/time for one-shot, or check Recurring and set an interval (minutes, hours, or days). Scheduled messages fire as real chat messages from you, complete with @mentions that trigger agents automatically.
@@ -473,6 +473,7 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 | `summary_tree_views.py` | Agent-facing summary text — fresh-read header, zoom, regex recall |
 | `summary_tree_layout.py` | Picks which tree nodes to show — coarse for old history, fine for recent |
 | `summary_compressor_worker.py` | Background workers writing summary lines with a headless CLI (Codex Luna by default) |
+| `summary_compressor_prompts.py` | Compressor prompts — OptChat-style instructions, 512-byte scale line, retry feedback |
 | `session_engine.py` | Session orchestration — phase advancement, turn triggering, prompt assembly |
 | `session_store.py` | Session persistence — run state, template loading/validation, custom template storage |
 | `session_templates/` | Built-in session templates (JSON) — code review, debate, design critique, planning |

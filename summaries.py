@@ -1,21 +1,33 @@
-"""Per-channel summary tree over chat history (OptMem-style memory).
+"""Per-channel summary tree over chat history (OptChat-style memory).
 
-The chat log itself is the memory. Every BLOCK_MESSAGES consecutive chat
-messages form a leaf block that is compressed into one line; each pair of
-neighbouring blocks is merged into a parent line, recursively, so old history
-collapses into a few lines while recent history stays detailed.
+The chat log itself is the memory. The tree is purely binary (OptChat spec
+§3): each chat message is a leaf with one line, and each pair of neighbouring
+nodes is merged into a parent line, recursively, so old history collapses
+into a few lines while recent history stays detailed.
+
+Free nodes need no model call: a message that fits in NODE_BYTES is its own
+leaf line, verbatim (`sender: text`), and a parent whose two children's lines
+fit in NODE_BYTES together is just those lines. So short messages, the
+human's above all, stay word for word until they are merged.
 
 This module does bookkeeping only. Compression (LLM calls) is done by
 summary_compressor_worker.py, which pulls jobs via next_job()/complete_job().
 Text output for agents (header, zoom, recall) lives in summary_tree_views.py.
 
 State per channel in <dir>/<channel>.json:
-    {"start_id": int,
-     "levels": [[{"lo": id, "hi": id, "text": str | None, "ids": [...]}, ...], ...]}
-levels[0] holds leaves (with their message ids); levels[k + 1][j] merges
+    {"version": TREE_VERSION, "start_id": int,
+     "levels": [[{"lo": id, "hi": id, "text": str | None}, ...], ...]}
+levels[0] holds leaves (lo == hi == the message id); levels[k + 1][j] merges
 levels[k][2j] and levels[k][2j + 1]. text=None means "needs (re)compression".
-Blocks are keyed by message ids, so deleting a message never shifts blocks; it
-only marks the leaf containing it, and that leaf's ancestors, stale.
+Nodes are keyed by message ids, so deleting a message never shifts the tree:
+its leaf becomes the free line DELETED and its ancestors are rewritten.
+A tree written under another TREE_VERSION is rebuilt from the chat log on
+load; until a node is rewritten, agents still see the line an old node with
+the same id range had, as "old" (never used as compressor context).
+
+Lines are written in history order (OptChat's rule): a node is compressed only
+once every leaf before it has a line, so its compressor gets the summary up to
+it as context.
 
 A channel is initialized lazily by ensure() (when an agent starts in, or first
 reads, the channel). Only then are up to `backfill_days` of history indexed.
@@ -31,10 +43,12 @@ import time
 from pathlib import Path
 
 import summary_tree_views as views
+from summary_compressor_prompts import NODE_BYTES
 
 log = logging.getLogger(__name__)
 
-BLOCK_MESSAGES = 16
+TREE_VERSION = 3             # bump when the tree shape, line format or prompt changes
+CONTEXT_BYTES = 32000        # summary given to a compressor as context
 RETRY_SECONDS = 300          # per-block retry delay after a failed compression
 BREAKER_FAILURES = 3         # consecutive failures that pause all compression
 BREAKER_MAX_SECONDS = 3600   # pause doubles per further failure, up to this
@@ -49,7 +63,7 @@ class SummaryStore:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._store = store
         self._backfill_days = float(cfg.get("backfill_days", 30))
-        self._read_lines = int(cfg.get("read_lines", 12))
+        self._read_bytes = int(cfg.get("read_bytes", 8000))
         self._lock = threading.RLock()
         self._state: dict[str, dict] = {}
         self._claimed: set[tuple] = set()  # jobs being compressed right now
@@ -69,10 +83,39 @@ class SummaryStore:
         for path in self._dir.glob("*.json"):
             try:
                 raw = json.loads(path.read_text("utf-8"))
-                if isinstance(raw, dict) and isinstance(raw.get("levels"), list):
-                    self._state[path.stem] = raw
             except (OSError, json.JSONDecodeError):
                 log.warning("Ignoring unreadable summary tree %s", path)
+                continue
+            if not (isinstance(raw, dict) and isinstance(raw.get("levels"), list)):
+                continue
+            if raw.get("version") == TREE_VERSION:
+                self._state[path.stem] = raw
+                continue
+            try:
+                self._rebuild(path.stem, raw)
+            except Exception:  # a malformed old tree must not stop the server
+                log.exception("Could not rebuild summary tree %s; ignoring it", path)
+                self._state.pop(path.stem, None)
+
+    def _rebuild(self, channel: str, old: dict):
+        """Re-index a tree from another TREE_VERSION from the chat log. A new
+        node covering exactly the messages of an old node (e.g. a level-4 node
+        and an old 16-message leaf) shows the old line until it is rewritten."""
+        log.info("Summary tree #%s is from another version; rebuilding it", channel)
+        lines = {(b["lo"], b["hi"]): b.get("text") or b.get("old")
+                 for level in old["levels"] for b in level}
+        self._state[channel] = self._new_tree(int(old.get("start_id", 0)))
+        self._sync(channel)
+        for level in self._state[channel]["levels"]:
+            for block in level:
+                line = lines.get((block["lo"], block["hi"]))
+                if line and block["text"] is None:
+                    block["old"] = line
+        self._save(channel)
+
+    @staticmethod
+    def _new_tree(start_id: int) -> dict:
+        return {"version": TREE_VERSION, "start_id": start_id, "levels": []}
 
     def _save(self, channel: str):
         path = self._dir / f"{channel}.json"
@@ -115,7 +158,7 @@ class SummaryStore:
                     start_id = recent[0]["id"]
                 else:  # nothing in the window: start after the latest message
                     start_id = self._store.get_recent(1, channel=channel)[-1]["id"] + 1
-                self._state[channel] = {"start_id": start_id, "levels": []}
+                self._state[channel] = self._new_tree(start_id)
             grew = self._sync(channel)
             if created or grew:
                 self._save(channel)
@@ -133,27 +176,22 @@ class SummaryStore:
             self._save(channel)
         self._notify()
 
-    def unsummarized(self, channel: str) -> list[dict]:
-        """Chat messages after the last leaf (not yet in any block)."""
-        st = self._state.get(channel)
-        if not st:
-            return []
-        leaves = st["levels"][0] if st["levels"] else []
-        after = leaves[-1]["hi"] if leaves else st["start_id"] - 1
-        return views.chat_only(self._store.get_since(after, channel=channel))
-
     def _sync(self, channel: str) -> bool:
-        """Cut full leaf blocks from new messages; add parent placeholders."""
-        levels = self._state[channel]["levels"]
-        fresh = self.unsummarized(channel)
-        grew = False
-        while len(fresh) >= BLOCK_MESSAGES:
-            chunk, fresh = fresh[:BLOCK_MESSAGES], fresh[BLOCK_MESSAGES:]
-            if not levels:
-                levels.append([])
-            levels[0].append({"lo": chunk[0]["id"], "hi": chunk[-1]["id"], "text": None,
-                              "ids": [m["id"] for m in chunk]})
-            grew = True
+        """Add a leaf per new chat message and a parent per new complete pair,
+        then write the free lines among them."""
+        st = self._state[channel]
+        levels = st["levels"]
+        after = levels[0][-1]["hi"] if levels and levels[0] else st["start_id"] - 1
+        fresh = views.chat_only(self._store.get_since(after, channel=channel))
+        if not fresh:
+            return False
+        if not levels:
+            levels.append([])
+        first = len(levels[0])
+        for msg in fresh:
+            line = views.message_line(msg)
+            levels[0].append({"lo": msg["id"], "hi": msg["id"],
+                              "text": line if _fits(line) else None})
         k = 0
         while k < len(levels) and len(levels[k]) >= 2:
             if k + 1 == len(levels):
@@ -163,12 +201,15 @@ class SummaryStore:
                 a, b = levels[k][2 * len(upper)], levels[k][2 * len(upper) + 1]
                 upper.append({"lo": a["lo"], "hi": b["hi"], "text": None})
             k += 1
-        return grew
+        for i in range(first, len(levels[0])):
+            _fill_free(levels, 0, i)
+        return True
 
     # ------------------------------------------------------------ invalidation
 
     def _invalidate(self, channel: str, k: int, block: dict):
         block["text"] = None
+        block.pop("old", None)  # it may quote the deleted message
         key = (channel, k, block["lo"], block["hi"])
         self._retry_at.pop(key, None)
         if key in self._claimed:
@@ -180,7 +221,8 @@ class SummaryStore:
         self._retry_at = {k: v for k, v in self._retry_at.items() if k[0] != channel}
 
     def on_delete(self, msg_ids: list[int]):
-        """Store callback: deleted messages make their leaf and its ancestors stale."""
+        """Store callback: a deleted message's leaf becomes DELETED and its
+        ancestors are rewritten (for free where the lines still fit)."""
         gone = set(msg_ids)
         if not gone:
             return
@@ -189,12 +231,14 @@ class SummaryStore:
             for channel, st in self._state.items():
                 levels = st["levels"]
                 hit = [i for i, leaf in enumerate(levels[0] if levels else [])
-                       if gone.intersection(leaf.get("ids", ()))]
+                       if leaf["lo"] in gone]
                 for i in hit:
-                    levels[0][i]["ids"] = [x for x in levels[0][i]["ids"] if x not in gone]
                     for k in range(len(levels)):
                         if (i >> k) < len(levels[k]):
                             self._invalidate(channel, k, levels[k][i >> k])
+                    levels[0][i]["text"] = views.DELETED
+                for i in hit:
+                    _fill_free(levels, 0, i)
                 if hit:
                     self._save(channel)
                     touched = True
@@ -208,7 +252,7 @@ class SummaryStore:
                 return
             self._forget_jobs(channel)
             # Visible history starts after the clear marker, so 0 is safe.
-            self._state[channel] = {"start_id": 0, "levels": []}
+            self._state[channel] = self._new_tree(0)
             self._save(channel)
 
     def rename(self, old: str, new: str):
@@ -225,42 +269,63 @@ class SummaryStore:
 
     # ------------------------------------------------------------ jobs
 
+    def _gate(self, channel: str, leaves: list, now: float) -> int:
+        """Index of the first leaf still to be written (len(leaves) if none).
+        Nodes starting after it wait for it. A leaf backing off after a failed
+        compression does not count, so one bad block cannot stall the tree."""
+        for i, leaf in enumerate(leaves):
+            if (leaf["text"] is None
+                    and self._retry_at.get((channel, 0, leaf["lo"], leaf["hi"]), 0) <= now):
+                return i
+        return len(leaves)
+
     def next_job(self) -> dict | None:
-        """Claim the most useful pending compression: lowest level first, then
-        newest block (recent detail matters most to a newly arriving agent)."""
+        """Claim the next compression in history order: lowest level first, then
+        oldest block, skipping nodes that start after the channel's gate. The
+        job carries the summary up to the node as context."""
         now = time.time()
         with self._lock:
             if now < self._paused_until:
                 return None
             best = None
             for channel, st in self._state.items():
-                for k, level in enumerate(st["levels"]):
+                levels = st["levels"]
+                gate = self._gate(channel, levels[0] if levels else [], now)
+                for k, level in enumerate(levels):
                     for j, block in enumerate(level):
+                        if (j << k) > gate:  # the node starts past the gate
+                            break
                         key = (channel, k, block["lo"], block["hi"])
                         if (block["text"] is not None or key in self._claimed
                                 or self._retry_at.get(key, 0) > now):
                             continue
-                        kids = st["levels"][k - 1][2 * j:2 * j + 2] if k else []
+                        kids = levels[k - 1][2 * j:2 * j + 2] if k else []
                         if any(c["text"] is None for c in kids):
                             continue
-                        rank = (k, -block["hi"])
+                        rank = (k, block["lo"])
                         if best is None or rank < best[0]:
-                            best = (rank, key, block, kids)
+                            best = (rank, key, block, kids, levels, j)
             if best is None:
                 return None
-            _, key, block, kids = best
+            _, key, block, kids, levels, j = best
             self._claimed.add(key)
-            job = {"key": key, "channel": key[0], "level": key[1]}
+            k = key[1]
+            # Context (spec §4.2): a leaf sees the lines before it; a merge, the
+            # lines up to its end (its own halves included).
+            leaf_end = (j + 1) << k if k else j
+            job = {"key": key, "channel": key[0], "level": k,
+                   "context": views.context_lines(levels, leaf_end, CONTEXT_BYTES)}
             if kids:
-                job["parts"] = [{"lo": c["lo"], "hi": c["hi"], "text": c["text"]} for c in kids]
+                job["parts"] = [c["text"] for c in kids]
             else:
-                ids = set(block["ids"])
-                job["messages"] = [m for m in self._store.get_since(block["lo"] - 1, channel=key[0])
-                                   if m["id"] in ids]
+                msg = self._store.get_by_id(block["lo"])
+                job["message"] = dict(msg) if msg else None
             return job
 
-    def complete_job(self, job: dict, text: str | None):
-        """Store a compression result (None = failed, retry later)."""
+    def complete_job(self, job: dict, text: str | None, cli_failed: bool = True):
+        """Store a compression result (None = failed, retry later). Only a CLI
+        failure counts toward the breaker: one message the model cannot fit
+        must not pause every channel."""
         key = job["key"]
         channel, k, lo, hi = key
         with self._lock:
@@ -271,6 +336,8 @@ class SummaryStore:
             if text is None:
                 now = time.time()
                 self._retry_at[key] = now + RETRY_SECONDS
+                if not cli_failed:
+                    return
                 self._fail_streak += 1
                 if self._fail_streak >= BREAKER_FAILURES:
                     pause = min(BREAKER_MAX_SECONDS,
@@ -282,11 +349,14 @@ class SummaryStore:
             self._fail_streak = 0
             self._retry_at.pop(key, None)
             st = self._state.get(channel)
-            level = st["levels"][k] if st and k < len(st["levels"]) else []
-            block = next((b for b in level if b["lo"] == lo and b["hi"] == hi), None)
-            if block is None or block["text"] is not None:
+            levels = st["levels"] if st else []
+            level = levels[k] if k < len(levels) else []
+            j = next((j for j, b in enumerate(level) if b["lo"] == lo and b["hi"] == hi), None)
+            if j is None or level[j]["text"] is not None:
                 return
-            block["text"] = text
+            level[j]["text"] = text
+            level[j].pop("old", None)
+            _fill_free(levels, k, j)
             self._save(channel)
         self._notify()
 
@@ -306,14 +376,33 @@ class SummaryStore:
         st = self._snapshot(channel, ensure=True)
         if not st:
             return ""
-        return views.render_header(channel, st, self.unsummarized(channel),
-                                   self._store, self._read_lines)
+        return views.render_header(channel, st, self._store, self._read_bytes)
 
     def zoom(self, channel: str, block: str) -> str:
         st = self._snapshot(channel, ensure=True) or {"start_id": 0, "levels": []}
         return views.zoom(channel, st, block, self._store)
 
     def recall(self, channel: str, query: str) -> str:
-        st = self._snapshot(channel, ensure=False) or {"start_id": 0, "levels": []}
         msgs = views.chat_only(self._store.get_since(-1, channel=channel))
-        return views.recall(st, msgs, query)
+        return views.recall(msgs, query)
+
+
+def _fits(text: str) -> bool:
+    return len(text.encode()) <= NODE_BYTES
+
+
+def _fill_free(levels: list, k: int, j: int):
+    """Write the free ancestors of node (k, j): a parent whose two children's
+    lines fit in NODE_BYTES together is just those lines, one under the other
+    (OptChat's free nodes). Stops at the first parent that needs a model."""
+    while k + 1 < len(levels) and (j >> 1) < len(levels[k + 1]):
+        parent = levels[k + 1][j >> 1]
+        a, b = levels[k][j & ~1], levels[k][j | 1]
+        if parent["text"] is not None or a["text"] is None or b["text"] is None:
+            return
+        text = f"{a['text']}\n{b['text']}"
+        if not _fits(text):
+            return
+        parent["text"] = text
+        parent.pop("old", None)
+        k, j = k + 1, j >> 1

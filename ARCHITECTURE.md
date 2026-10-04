@@ -554,38 +554,60 @@ Schedules can be paused, resumed, deleted, recurring, or one-shot.
 
 ## Summaries
 
-Channel summaries are an OptMem-style tree over each channel's chat history.
+Channel summaries are an OptChat-style tree (successor of OptMem) over each
+channel's chat history.
 
-- `summaries.py` (`SummaryStore`) indexes visible `chat` messages into leaf
-  blocks of 16 messages and adds a parent block for every complete pair, per
-  level. Blocks are keyed by message-id ranges (leaves also keep their message
-  ids), so deletions never shift blocks. State lives in
-  `data/summaries/<channel>.json`; `text: null` marks a block that needs
-  (re)compression.
+- `summaries.py` (`SummaryStore`) keeps a purely binary tree per channel:
+  each visible `chat` message is a leaf (`lo == hi ==` its id) and every
+  complete pair of nodes gets a parent, per level. Free nodes need no model
+  call: a message that fits in 512 bytes is its own leaf line, verbatim
+  (`sender: text`, line breaks folded to spaces), and a parent whose two
+  children fit in 512 bytes together is just those lines, one per line.
+  Nodes are keyed by message-id ranges, so deletions never shift the tree: a
+  deleted message's leaf becomes `(message deleted)` and its ancestors are
+  rewritten. State lives in `data/summaries/<channel>.json`; `text: null`
+  marks a node that needs (re)compression. A tree saved under another
+  `TREE_VERSION` is rebuilt from the chat log on load; a new node with the
+  same id range as an old node shows the old line (`old`) until it is
+  rewritten — never fed to a compressor, dropped when a deletion touches it.
 - A channel is initialized lazily by `ensure()` — called when an agent is
   auto-started in the channel and on an agent's first read — and backfills up
   to `[summaries].backfill_days` of history. Initialized channels index new
   messages through a `MessageStore.on_message` callback.
-- `summary_compressor_worker.py` (`SummaryCompressor`) runs worker threads that
-  claim jobs (lowest level first, newest block first), run the configured CLI
+- Jobs run in history order (OptChat's rule): lowest level first, then oldest
+  node, and a node waits while any leaf before it is still unwritten, so each
+  job carries the summary up to it as context (`context_lines`, up to 32 KB,
+  ids stripped). A leaf backing off after a failure stops blocking the
+  ones after it, so one bad block cannot stall a channel.
+- `summary_compressor_worker.py` (`SummaryCompressor`) runs worker threads
+  (`workers`, default 4) that claim jobs (a message too long to keep, or two
+  stretches whose lines no longer fit together), run the configured CLI
   (default `codex exec -m gpt-6-luna`, read-only, `--ignore-user-config`,
-  `--ephemeral`) with the prompt on stdin, and store one line of at most 280
-  bytes. Failed jobs back off for 5 minutes; 3 consecutive failures pause all
-  compression (doubling up to 1 hour) so a logged-out or missing CLI is not
-  hammered. Workers log and survive any error. Nothing is posted to chat.
-- `summary_tree_layout.py` picks the nodes to show within `read_lines`:
-  coarse for old history, fine for recent. Nodes still being compressed render
-  as their children instead of blocking.
-- `summary_tree_views.py` renders the header, `zoom` (a block's halves, a
-  leaf's raw messages, or the messages around one message id) and `recall`
-  (regex over the channel's raw history, with the containing block id;
-  queries over 200 chars or with nested quantifiers like `(a+)+` are
+  `--ephemeral`) with the prompt on stdin, and store one line. Prompts live in `summary_compressor_prompts.py`, adapted
+  from OptChat's compactor: the human's words (room `username`) rank first,
+  items are tagged by sender, the input has no ids or timestamps and is never
+  truncated (a message's further lines are indented so its text cannot pose
+  as another sender), and a real 512-byte line is shown for scale. An answer
+  over 600 bytes is re-asked up to 5 times with how far over 512 it is; the
+  shortest try is kept, never cut, and one still over 1024 bytes fails
+  the job. Failed jobs back off for 5 minutes; 3 consecutive failures pause
+  all compression (doubling up to 1 hour) so a logged-out or missing CLI is
+  not hammered. Workers log and survive any error. Nothing is posted to chat.
+- `summary_tree_layout.py` picks the nodes to show with OptChat's fold, from
+  scratch per call: start from every leaf and, while over a byte budget
+  (`read_bytes` for the header, 32 KB for compressor context), replace the
+  most due pair of siblings (oldest relative to its size) by their parent.
+  Written parents are merged first; unwritten ones only when nothing else is
+  left (a placeholder in the header, nothing in context).
+- `summary_tree_views.py` renders the header, `zoom` (a node's halves, or
+  one message whole with its neighbours) and `recall` (regex over the
+  channel's raw history; queries over 200 chars or with nested quantifiers like `(a+)+` are
   rejected, since Python's `re` cannot time out).
 - `chat_read` prepends the header on an agent's first read of a channel (no
   cursor yet); `chat_resync` always does.
-- `MessageStore.on_delete` marks the leaf containing a deleted message and
-  its ancestors stale; results computed from the old content mid-flight are
-  discarded. `/clear` resets the channel's tree, and channel rename moves it.
+- `MessageStore.on_delete` turns a deleted message's leaf into
+  `(message deleted)` and marks its ancestors stale; results computed from
+  the old content mid-flight are discarded. `/clear` resets the channel's tree, and channel rename moves it.
 
 Legacy `summary` timeline messages from the old manual `/summary` flow still
 render, but no new ones are created.

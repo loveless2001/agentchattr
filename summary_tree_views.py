@@ -1,8 +1,9 @@
 """Text views of a channel summary tree for agents (MCP tool output).
 
 - render_header: the compressed channel history a fresh agent reads first.
-- zoom: open one summary line into its halves, or into raw messages.
+- zoom: open one summary line into its halves, or show one message whole.
 - recall: regex search over the channel's raw chat messages.
+- context_lines: the summary before a node, as context for its compressor.
 
 Works on a snapshot of one channel's tree state (see summaries.py for the
 format) plus messages read from the MessageStore. No state of its own.
@@ -11,13 +12,14 @@ format) plus messages read from the MessageStore. No state of its own.
 import re
 import time
 
-from summary_tree_layout import node_level, pick_nodes
+from summary_tree_layout import fold
 
 OUTPUT_CHARS = 20000   # cap for zoom/recall output (fits every agent CLI)
-MSG_CHARS = 1500       # per-message cap when showing raw messages
+MSG_CHARS = 1500       # per-message cap for messages shown next to the one asked for
 SNIPPET_CHARS = 300    # recall snippet length
 NEIGHBOURS = 8         # messages shown on each side for block='<message id>'
 MAX_QUERY_CHARS = 200
+DELETED = "(message deleted)"  # the line of a deleted message's leaf
 # A quantified group that itself contains a quantifier, e.g. (a+)+ or (\w+\s?)*:
 # the classic catastrophic-backtracking shape. Python's re has no timeout and
 # holds the GIL, so one such query could stall the whole server.
@@ -34,14 +36,26 @@ def _stamp(msg: dict, fmt: str = "%Y-%m-%d %H:%M") -> str:
     return time.strftime(fmt, time.localtime(ts)) if ts else msg.get("time", "")
 
 
+def attachment_note(msg: dict) -> str:
+    """' [attachments: a.png, b.pdf]' for a message with named attachments, else ''."""
+    names = [" ".join(a["name"].split()) for a in msg.get("attachments") or [] if a.get("name")]
+    return f" [attachments: {', '.join(names)}]" if names else ""
+
+
+def message_line(msg: dict) -> str:
+    """A message on one line, as a free leaf keeps it: `sender: text`, every
+    whitespace run (line breaks of any kind included) folded to one space, so
+    in a node made of several messages each line is one message and text
+    inside a message cannot pass for another sender."""
+    sender = " ".join(str(msg.get("sender", "?")).split())
+    return f"{sender}: " + " ".join((msg.get("text", "") + attachment_note(msg)).split())
+
+
 def format_message(msg: dict, limit: int = MSG_CHARS) -> str:
     text = msg.get("text", "")
     if len(text) > limit:
         text = text[:limit] + f"… [+{len(text) - limit} chars]"
-    names = [a.get("name", "") for a in msg.get("attachments") or [] if a.get("name")]
-    if names:
-        text += f" [attachments: {', '.join(names)}]"
-    return f"#{msg['id']} [{_stamp(msg)}] {msg.get('sender', '?')}: {text}"
+    return f"#{msg['id']} [{_stamp(msg)}] {msg.get('sender', '?')}: {text}{attachment_note(msg)}"
 
 
 def _capped(lines: list[str]) -> str:
@@ -55,42 +69,60 @@ def _capped(lines: list[str]) -> str:
     return "\n".join(out)
 
 
-def _node_lines(levels: list, lo: int, hi: int, out: list[str]):
-    """One layout node; a node still being compressed shows its halves."""
-    k = node_level(lo, hi)
-    block = levels[k][lo >> k]
-    if block["text"]:
-        out.append(f"#{block['lo']}-{block['hi']} {block['text']}")
-    elif k == 0:
-        out.append(f"#{block['lo']}-{block['hi']} (summary pending — zoom to read "
-                   f"these {len(block.get('ids', []))} messages)")
-    else:
-        mid = (lo + hi) // 2
-        _node_lines(levels, lo, mid, out)
-        _node_lines(levels, mid, hi, out)
+def shown_text(block: dict) -> str | None:
+    """Line shown to agents: the current one, else the stale line it replaces
+    while a tree is rebuilt after a TREE_VERSION change."""
+    return block["text"] or block.get("old")
 
 
-def render_header(channel: str, st: dict, tail: list[dict], store, read_lines: int) -> str:
+def block_id(block: dict) -> str:
+    """'#lo-hi' for a node, '#id' for a single message."""
+    return f"#{block['lo']}" if block["lo"] == block["hi"] else f"#{block['lo']}-{block['hi']}"
+
+
+def _part_line(level: int, block: dict) -> str:
+    """A node as agents see it: its id, then its line; a free node made of
+    several messages continues on indented lines, one message each."""
+    text = shown_text(block)
+    if not text:
+        text = ("(not summarized yet — zoom to read it)" if level == 0
+                else f"(summary pending — zoom to read these {1 << level} messages)")
+    return f"{block_id(block)} " + text.replace("\n", "\n    ")
+
+
+def context_lines(levels: list, leaf_end: int, budget: int) -> list[str]:
+    """Written summary lines covering leaves [0, leaf_end), coarse old to fine
+    recent, within about `budget` bytes, as bare text (no block ids: a
+    compressor shown ids copies them). Unwritten nodes are left out, so a
+    compressor never sees a placeholder or a stale line."""
+    def cost(k: int, j: int) -> tuple[int, bool]:
+        text = levels[k][j]["text"]
+        return (len(text.encode()) + 1, True) if text else (0, False)
+
+    texts = (levels[k][j]["text"] for k, j in fold(leaf_end, budget, cost))
+    return [text for text in texts if text]
+
+
+def render_header(channel: str, st: dict, store, read_bytes: int) -> str:
     levels = st["levels"]
     leaves = levels[0] if levels else []
-    if not leaves and not tail:
+    if not leaves:
         return ""
-    total = sum(len(leaf.get("ids", [])) for leaf in leaves) + len(tail)
-    first_id = leaves[0]["lo"] if leaves else tail[0]["id"]
-    first = store.get_since(first_id - 1, channel=channel)[:1]
+    total = sum(1 for leaf in leaves if leaf["text"] != DELETED)
+    first = store.get_since(leaves[0]["lo"] - 1, channel=channel)[:1]
     since = _stamp(first[0], "%Y-%m-%d") if first else "?"
     lines = [
         f"[#{channel} summary — {total} messages since {since}, oldest first. "
         f"Expand a line: chat_summary(action='zoom', channel='{channel}', block='<a-b>'); "
-        f"messages around an id: block='<id>'; search history: "
+        f"one message whole, with its neighbours: block='<id>'; search history: "
         f"chat_summary(action='recall', channel='{channel}', query='<regex>')]"
     ]
-    for lo, hi in pick_nodes(len(leaves), read_lines):
-        _node_lines(levels, lo, hi, lines)
-    if not leaves:
-        lines.append("(too few messages for a summary block yet)")
-    if tail:
-        lines.append(f"(+{len(tail)} newest messages not summarized yet — see the messages below)")
+
+    def cost(k: int, j: int) -> tuple[int, bool]:
+        block = levels[k][j]
+        return len(_part_line(k, block).encode()) + 1, bool(shown_text(block))
+
+    lines += [_part_line(k, levels[k][j]) for k, j in fold(len(leaves), read_bytes, cost)]
     pending = sum(1 for level in levels for b in level if b["text"] is None)
     if pending:
         lines.append(f"({pending} summary lines are still being written in the background)")
@@ -99,12 +131,25 @@ def render_header(channel: str, st: dict, tail: list[dict], store, read_lines: i
 
 
 def _around(channel: str, msg_id: int, store) -> str:
+    """One message whole, with up to NEIGHBOURS messages (capped) on each
+    side, nearest first while the output stays under OUTPUT_CHARS."""
     msgs = chat_only(store.get_since(-1, channel=channel))
     idx = next((i for i, m in enumerate(msgs) if m["id"] == msg_id), None)
     if idx is None:
         return f"Error: message #{msg_id} not found in #{channel}."
-    window = msgs[max(0, idx - NEIGHBOURS): idx + NEIGHBOURS + 1]
-    return _capped([f"Messages around #{msg_id} in #{channel}:"] + [format_message(m) for m in window])
+    shown = {idx: format_message(msgs[idx], OUTPUT_CHARS)}
+    room = OUTPUT_CHARS - len(shown[idx])
+    for step in (-1, 1):
+        for i in range(idx + step, idx + step * (NEIGHBOURS + 1), step):
+            if not 0 <= i < len(msgs):
+                break
+            line = format_message(msgs[i])
+            if len(line) + 1 > room:
+                break
+            shown[i] = line
+            room -= len(line) + 1
+    return "\n".join([f"Message #{msg_id} in #{channel} (whole), with its neighbours:"]
+                     + [shown[i] for i in sorted(shown)])
 
 
 def zoom(channel: str, st: dict, block: str, store) -> str:
@@ -113,9 +158,10 @@ def zoom(channel: str, st: dict, block: str, store) -> str:
     if not match:
         return ("Error: block must be a summary line id like '120-151', "
                 "or a message id like '137'.")
-    if match.group(2) is None:
-        return _around(channel, int(match.group(1)), store)
-    lo, hi = int(match.group(1)), int(match.group(2))
+    lo = int(match.group(1))
+    hi = int(match.group(2) or lo)
+    if lo == hi:
+        return _around(channel, lo, store)
     levels = st["levels"]
     found = next(((k, j) for k, level in enumerate(levels)
                   for j, b in enumerate(level) if b["lo"] == lo and b["hi"] == hi), None)
@@ -123,19 +169,13 @@ def zoom(channel: str, st: dict, block: str, store) -> str:
         return (f"Error: no summary line #{lo}-{hi} in #{channel}. "
                 "Use the ids exactly as the summary prints them.")
     k, j = found
-    if k == 0:
-        ids = set(levels[0][j].get("ids", []))
-        msgs = [m for m in store.get_since(lo - 1, channel=channel) if m["id"] in ids]
-        lines = [f"Raw messages of #{lo}-{hi} in #{channel}:"] + [format_message(m) for m in msgs]
-        return _capped(lines)
     lines = [f"#{lo}-{hi} in #{channel} splits into:"]
-    for kid in levels[k - 1][2 * j:2 * j + 2]:
-        lines.append(f"#{kid['lo']}-{kid['hi']} {kid['text'] or '(summary pending)'}")
-    lines.append("Zoom into either line to go deeper.")
-    return "\n".join(lines)
+    lines += [_part_line(k - 1, kid) for kid in levels[k - 1][2 * j:2 * j + 2]]
+    lines.append("Zoom into either line to go deeper, or into a message id to read it whole.")
+    return _capped(lines)
 
 
-def recall(st: dict, msgs: list[dict], query: str) -> str:
+def recall(msgs: list[dict], query: str) -> str:
     if not (query or "").strip():
         return "Error: query (a regex) is required."
     if len(query) > MAX_QUERY_CHARS:
@@ -146,10 +186,6 @@ def recall(st: dict, msgs: list[dict], query: str) -> str:
         pattern = re.compile(query, re.IGNORECASE)
     except re.error as exc:
         return f"Error: bad regex: {exc}"
-    leaf_of = {}
-    for leaf in (st["levels"][0] if st["levels"] else []):
-        for msg_id in leaf.get("ids", []):
-            leaf_of[msg_id] = f" (in #{leaf['lo']}-{leaf['hi']})"
     hits = [(m, hit) for m in msgs if (hit := pattern.search(m.get("text", "")))]
     if not hits:
         return "No match."
@@ -159,8 +195,7 @@ def recall(st: dict, msgs: list[dict], query: str) -> str:
         start = max(0, hit.start() - SNIPPET_CHARS // 3)
         snippet = text[start:start + SNIPPET_CHARS].replace("\n", " ")
         snippet = ("…" if start else "") + snippet + ("…" if start + SNIPPET_CHARS < len(text) else "")
-        line = (f"#{msg['id']} [{_stamp(msg)}] {msg.get('sender', '?')}: {snippet}"
-                f"{leaf_of.get(msg['id'], '')}")
+        line = f"#{msg['id']} [{_stamp(msg)}] {msg.get('sender', '?')}: {snippet}"
         if size + len(line) > OUTPUT_CHARS:
             break
         out.append(line)
@@ -168,4 +203,5 @@ def recall(st: dict, msgs: list[dict], query: str) -> str:
     out.reverse()
     footer = (f"{len(hits)} matches." if len(out) == len(hits)
               else f"Newest {len(out)} of {len(hits)} matches — narrow the query.")
-    return "\n".join(out + [footer + " Read around a hit: chat_summary(action='zoom', block='<id>')."])
+    return "\n".join(out + [footer + " Read a hit whole, with its neighbours: "
+                                     "chat_summary(action='zoom', block='<id>')."])

@@ -1,75 +1,55 @@
-"""Which summary-tree nodes to show when an agent reads a channel summary.
+"""Which summary-tree nodes to show for a stretch of channel history.
 
-Pure math, no I/O. Units are leaf blocks (each leaf summarizes a fixed run of
-chat messages). A node is an aligned power-of-two range [lo, hi) of leaves; a
-node of size 2**k lives at tree level k, index lo >> k.
+Pure math, no I/O. Units are leaves (one chat message each). A part (k, j)
+is the tree node at level k, index j: it covers leaves [j·2^k, (j+1)·2^k).
 
-The layout is coarse for old history and fine for recent history: a node is
-shown whole only while its size is small relative to how far back it starts,
-so detail decays with age (the idea behind OptMem's `wake`).
+The layout is OptChat's fold (spec §5.2), done from scratch per call: start
+with every leaf, then, while the lines are over a byte budget, replace the
+most due pair of adjacent sibling parts by their parent. A pair at level l
+starting at leaf `start` is due (total - start) / 2^(l+2): oldest relative to
+its size first, so detail fades with age while each level keeps about as many
+lines.
 """
 
-
-def node_level(lo: int, hi: int) -> int:
-    """Tree level of the aligned node [lo, hi)."""
-    return (hi - lo).bit_length() - 1
+import heapq
 
 
-def _tile(total: int, alpha: float) -> list[tuple[int, int]]:
-    """Tile [0, total) with aligned power-of-two nodes.
+def fold(total: int, budget: int, cost) -> list[tuple[int, int]]:
+    """Parts tiling leaves [0, total), oldest first, within about `budget` bytes.
 
-    A node stays whole when it is complete (ends at or before `total`) and its
-    size is at most `alpha` times its distance from the present. Larger alpha
-    keeps bigger nodes whole, so it yields fewer, coarser lines.
-    """
-    span = 1
-    while span < total:
-        span *= 2
-    tiles: list[tuple[int, int]] = []
-    stack = [(0, span)]
-    while stack:
-        lo, hi = stack.pop()
-        if lo >= total:
-            continue
-        size = hi - lo
-        if size > 1 and (hi > total or size > alpha * (total - lo)):
-            mid = lo + size // 2
-            stack.append((mid, hi))
-            stack.append((lo, mid))
-        else:
-            tiles.append((lo, hi))
-    tiles.sort()
-    return tiles
-
-
-def pick_nodes(total: int, budget: int) -> list[tuple[int, int]]:
-    """Nodes to render for `total` leaves within about `budget` lines.
-
-    If every leaf fits, each leaf is its own line. Otherwise binary-search the
-    coarsest-acceptable alpha, then spend any lines left over splitting the
-    newest splittable node, because recent detail is worth the most.
+    cost(k, j) -> (bytes, shown): what part (k, j)'s line takes, and whether
+    it is a real line. Pairs whose parent is shown are merged first; a parent
+    that is not shown is merged into only when nothing else is left, so the
+    budget holds even while much of the tree is still being written.
     """
     if total <= 0:
         return []
-    budget = max(1, budget)
-    if total <= budget:
-        return [(i, i + 1) for i in range(total)]
-    lo, hi = 0.0, float(total)
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        if len(_tile(total, mid)) > budget:
-            lo = mid
-        else:
-            hi = mid
-    nodes = _tile(total, hi)
-    while len(nodes) < budget:
-        newest = next(
-            (i for i in range(len(nodes) - 1, -1, -1) if nodes[i][1] - nodes[i][0] > 1),
-            None,
-        )
-        if newest is None:
-            break
-        a, b = nodes[newest]
-        mid = (a + b) // 2
-        nodes[newest:newest + 1] = [(a, mid), (mid, b)]
-    return nodes
+    sizes: dict[tuple[int, int], tuple[int, bool]] = {}
+
+    def size(k: int, j: int) -> tuple[int, bool]:
+        if (k, j) not in sizes:
+            sizes[k, j] = cost(k, j)
+        return sizes[k, j]
+
+    view = {(0, j) for j in range(total)}
+    used = sum(size(0, j)[0] for j in range(total))
+    heap: list[tuple] = []
+
+    def offer(k: int, i: int):
+        """Queue merging (k, 2i) and (k, 2i+1) into (k+1, i), if both are shown."""
+        if ((i + 1) << (k + 1)) > total or (k, 2 * i) not in view or (k, 2 * i + 1) not in view:
+            return
+        start = i << (k + 1)
+        due = (total - start) / (1 << (k + 2))
+        heapq.heappush(heap, (not size(k + 1, i)[1], -due, start, k, i))
+
+    for i in range(total // 2):
+        offer(0, i)
+    while used > budget and heap:
+        *_, k, i = heapq.heappop(heap)
+        a, b = (k, 2 * i), (k, 2 * i + 1)
+        view -= {a, b}
+        view.add((k + 1, i))
+        used += size(k + 1, i)[0] - size(*a)[0] - size(*b)[0]
+        offer(k + 1, i >> 1)
+    return sorted(view, key=lambda part: part[1] << part[0])
