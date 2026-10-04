@@ -18,7 +18,6 @@ build/
 .gemini/
 .claude/
 .codex
-tests/
 agents_lineup.svg
 docs/
 goals.py

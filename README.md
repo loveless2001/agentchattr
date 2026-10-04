@@ -443,6 +443,15 @@ Connect any local model with an OpenAI-compatible API (Ollama, llama-server, LM 
 
 The wrapper registers with the server, watches for @mentions, reads recent chat context, calls your model's `/v1/chat/completions` endpoint, and posts the response back. `config.local.toml` is gitignored so your local endpoints stay out of the repo.
 
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s tests        # ~15 s, standard library only
+AGENTCHATTR_TEST_LUNA=1 .venv/bin/python -m unittest tests.test_e2e_server   # real Codex Luna compressor
+```
+
+Functional, integration, and end-to-end tests (macOS/Linux): the server log cap, chat log repair, the summary tree with its compressor workers, and the real server driven over HTTP and MCP on free ports with a temp config. The end-to-end tests use a private tmux socket, so they never touch running agent sessions. Summaries are written by a stand-in CLI unless `AGENTCHATTR_TEST_LUNA=1` is set.
+
 ## Architecture
 
 ```
