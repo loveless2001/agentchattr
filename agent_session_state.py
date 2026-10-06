@@ -15,14 +15,20 @@ Events:
   compact  {pre_tokens?, post_tokens?}   summary on the next channel read
   clear    {}                            new empty session: reset read cursors
   restart  {exit_code, crashed, resumed} fresh: reset cursors; crash: notice
+  attention {reason: resume_dialog, tmux_session?}
+                                         the CLI is stuck at Claude's resume dialog:
+                                         ask a human to answer it (prompts are held)
 """
 
+import re
 import threading
 import time
 
 _lock = threading.Lock()
 _sessions: dict[str, dict] = {}   # agent name -> context info
 _summary_pending: set[str] = set()
+
+_TMUX_SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
 # Smallest change in context usage (fraction of the window) worth a status broadcast.
 _BROADCAST_STEP = 0.01
@@ -136,6 +142,18 @@ def _restart_notice(name: str, body: dict) -> str:
     return f"{name}'s CLI {how} and was {outcome}."
 
 
+def _attention_notice(name: str, body: dict) -> str:
+    reason = body.get("reason")
+    if reason != "resume_dialog":
+        raise ValueError(f"unknown attention reason: {reason!r}")
+    session = str(body.get("tmux_session") or "")
+    where = (f" Open its terminal with `tmux attach -t {session}` and pick an option."
+             if _TMUX_SESSION.match(session) else " Open its terminal and pick an option.")
+    return (f"{name} is waiting at Claude's \"resume from summary / full session\" prompt, "
+            f"which could not be answered automatically. Messages for it are held until "
+            f"it is answered.{where}")
+
+
 def apply_event(name: str, body: dict, *, reset_cursors, post_notice) -> bool:
     """Apply one wrapper-reported session event for agent `name`.
 
@@ -166,5 +184,9 @@ def apply_event(name: str, body: dict, *, reset_cursors, post_notice) -> bool:
         if body.get("crashed"):
             post_notice(_restart_notice(name, body))
         return True
+
+    if event == "attention":
+        post_notice(_attention_notice(name, body))
+        return False
 
     raise ValueError(f"unknown session event: {event!r}")

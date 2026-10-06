@@ -324,7 +324,10 @@ Session monitor and crash recovery (`agent_session_monitor.py`,
   It posts a `restart` event and, after a crash, queues a nudge prompt (not
   after 3 crashes in 15 min, when relaunches also back off to 30 s). After a
   Claude resume the wrapper answers the "Resume from summary" dialog with its
-  default.
+  default. Every prompt the queue watcher injects into Claude first waits
+  until the wrapper is done with that dialog and it is off screen; if it
+  stays up 30 s, an `attention` event posts a notice asking a human to
+  answer it (`tmux attach -t …`), and prompts stay held until then.
 
 Provider MCP injection:
 

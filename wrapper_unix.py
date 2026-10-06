@@ -72,12 +72,17 @@ def _cli_is_ready(tmux_session: str) -> bool:
     return False
 
 
-def inject(text: str, *, tmux_session: str):
+def inject(text: str, *, tmux_session: str, before_send=None):
     """Send text + Enter to a tmux session via send-keys.
 
     Waits for the CLI to show its prompt before sending, then verifies
     Enter was processed — retries if the text is still in the input area.
+    before_send(), if given, blocks until the CLI may be typed into; the
+    queue watcher waits with it, so later triggers stay queued meanwhile.
     """
+    if before_send is not None:
+        before_send()
+
     # Wait for CLI to be ready (up to 30s for cold start / model loading)
     for _ in range(60):
         if _cli_is_ready(tmux_session):
@@ -123,6 +128,33 @@ def inject(text: str, *, tmux_session: str):
 _RESUME_DIALOG_OPTIONS = ("Resume from summary", "Resume full session as-is", "Don't ask me again")
 
 
+def resume_dialog_visible(tmux_session: str) -> bool:
+    """Claude's resume dialog is on screen: all three options at the bottom of
+    the pane (text about it in the resumed conversation does not match)."""
+    bottom = "\n".join(_pane_content(tmux_session).splitlines()[-15:])
+    return all(option in bottom for option in _RESUME_DIALOG_OPTIONS)
+
+
+def wait_out_resume_dialog(tmux_session: str, *, pending=None, on_stuck=None,
+                           notice_after: float = 30.0, poll: float = 1.0):
+    """Block while Claude's resume dialog is (or may be about to be) on screen,
+    so a prompt is never typed into it.
+
+    pending() is True while the wrapper is still answering the dialog of a
+    fresh relaunch. If the dialog stays up notice_after seconds after that,
+    on_stuck() is called once (to ask a human to answer it) and the wait goes
+    on until someone does."""
+    while pending is not None and pending():
+        time.sleep(poll)
+    waited, notified = 0.0, False
+    while resume_dialog_visible(tmux_session):
+        if waited >= notice_after and not notified and on_stuck is not None:
+            on_stuck()
+            notified = True
+        time.sleep(poll)
+        waited += poll
+
+
 def accept_resume_dialog(tmux_session: str, timeout: float = 20.0, still_current=None) -> bool:
     """Answer Claude Code's "Resume from summary / Resume full session" dialog,
     shown when resuming a large session whose prompt cache went cold, with its
@@ -137,8 +169,7 @@ def accept_resume_dialog(tmux_session: str, timeout: float = 20.0, still_current
     while time.time() < deadline:
         if still_current is not None and not still_current():
             return False
-        bottom = "\n".join(_pane_content(tmux_session).splitlines()[-15:])
-        if all(option in bottom for option in _RESUME_DIALOG_OPTIONS):
+        if resume_dialog_visible(tmux_session):
             subprocess.run(["tmux", "send-keys", "-t", tmux_session, "Enter"],
                            capture_output=True)
             return True
@@ -225,11 +256,13 @@ def run_agent(
     launch_args_fn=None,
     on_exit_fn=None,
     exit_code_file=None,
+    inject_hold=None,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys.
 
     launch_args_fn(extra_args) -> args for each (re)launch (e.g. resume a session);
     on_exit_fn(exit_code, uptime_seconds) -> seconds to wait before relaunching.
+    inject_hold() blocks each injection until the CLI may be typed into.
     """
     _check_tmux()
 
@@ -251,7 +284,7 @@ def run_agent(
     abs_cwd = str(Path(cwd).resolve())
 
     # Wire up injection with the tmux session name
-    inject_fn = lambda text: inject(text, tmux_session=session_name)
+    inject_fn = lambda text: inject(text, tmux_session=session_name, before_send=inject_hold)
     start_watcher(inject_fn)
 
     print(f"  Using tmux session: {session_name}")

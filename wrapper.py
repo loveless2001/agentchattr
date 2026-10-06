@@ -531,7 +531,7 @@ def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_s
     SessionStart hook through --settings and an env var naming its events file.
     """
     import urllib.request
-    from wrapper_unix import accept_resume_dialog
+    from wrapper_unix import accept_resume_dialog, wait_out_resume_dialog
 
     provider_dir = data_dir / "provider-config"
     events_file = None
@@ -560,6 +560,7 @@ def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_s
     monitor.start()
     policy = CrashRecoveryPolicy(agent, lambda: monitor.session_id)
     launch_count = [0]  # bumped per launch; follow-up work for a superseded launch is dropped
+    dialog_launch = [None]  # launch whose Claude resume dialog the wrapper is still answering
 
     def launch_args_fn(base_args):
         launch_count[0] += 1
@@ -568,19 +569,23 @@ def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_s
     def after_relaunch(decision, launch_no):
         """Once relaunch number launch_no is up: answer Claude's resume dialog, then nudge."""
         current = lambda: launch_count[0] == launch_no
-        deadline = time.time() + decision.delay + 30
-        while launch_count[0] < launch_no and time.time() < deadline:
-            time.sleep(0.5)
-        if not current():
-            return
-        time.sleep(2)  # let the CLI start drawing
-        if decision.resumed and agent == "claude":
-            if accept_resume_dialog(tmux_session, still_current=current):
-                # Resuming from a summary compacts the session.
-                try:
-                    report({"event": "compact"})
-                except Exception:
-                    pass
+        try:
+            deadline = time.time() + decision.delay + 30
+            while launch_count[0] < launch_no and time.time() < deadline:
+                time.sleep(0.5)
+            if not current():
+                return
+            time.sleep(2)  # let the CLI start drawing
+            if decision.resumed and agent == "claude":
+                if accept_resume_dialog(tmux_session, still_current=current):
+                    # Resuming from a summary compacts the session.
+                    try:
+                        report({"event": "compact"})
+                    except Exception:
+                        pass
+        finally:
+            if dialog_launch[0] == launch_no:
+                dialog_launch[0] = None
         if decision.nudge and current():
             _, queue_file = get_identity()
             entry = {"channel": channel, "prompt": nudge_prompt(channel, decision)}
@@ -590,6 +595,8 @@ def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_s
     def on_exit_fn(exit_code, uptime):
         decision = policy.on_exit(exit_code, uptime)  # reads the session id first
         monitor.mark_launch()
+        resuming_claude = decision.resumed and agent == "claude"
+        dialog_launch[0] = launch_count[0] + 1 if resuming_claude else None
         if decision.resumed:
             print(f"  Crashed — resuming session {decision.resume_session_id}.")
         elif decision.crashed:
@@ -604,11 +611,24 @@ def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_s
                              daemon=True).start()
         return decision.delay
 
+    def ask_for_help():
+        try:
+            report({"event": "attention", "reason": "resume_dialog", "tmux_session": tmux_session})
+        except Exception:
+            pass
+
+    def inject_hold():
+        """Queued prompts wait out Claude's resume dialog instead of being typed into it."""
+        wait_out_resume_dialog(tmux_session, pending=lambda: dialog_launch[0] is not None,
+                               on_stuck=ask_for_help)
+
     run_kwargs = {
         "launch_args_fn": launch_args_fn,
         "on_exit_fn": on_exit_fn,
         "exit_code_file": provider_dir / f"{instance_name}-exit-code",
     }
+    if agent == "claude":
+        run_kwargs["inject_hold"] = inject_hold
     return run_kwargs, launch_args, inject_env
 
 
