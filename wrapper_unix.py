@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 def _session_exists(session_name: str) -> bool:
@@ -119,6 +120,32 @@ def inject(text: str, *, tmux_session: str):
         )
 
 
+_RESUME_DIALOG_OPTIONS = ("Resume from summary", "Resume full session as-is", "Don't ask me again")
+
+
+def accept_resume_dialog(tmux_session: str, timeout: float = 20.0, still_current=None) -> bool:
+    """Answer Claude Code's "Resume from summary / Resume full session" dialog,
+    shown when resuming a large session whose prompt cache went cold, with its
+    default (resume from summary).
+
+    Watches the whole timeout (the dialog can appear after the input box has
+    rendered), and only the bottom of the pane with all three options on it,
+    so text about the dialog in the resumed conversation does not match.
+    Returns True if the dialog was answered; False after the timeout, or as
+    soon as still_current() says this launch has been superseded."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if still_current is not None and not still_current():
+            return False
+        bottom = "\n".join(_pane_content(tmux_session).splitlines()[-15:])
+        if all(option in bottom for option in _RESUME_DIALOG_OPTIONS):
+            subprocess.run(["tmux", "send-keys", "-t", tmux_session, "Enter"],
+                           capture_output=True)
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def get_activity_checker(session_name, trigger_flag=None):
     """Return a callable that detects tmux pane output by hashing content."""
     last_hash = [None]
@@ -143,28 +170,10 @@ def get_activity_checker(session_name, trigger_flag=None):
     return check
 
 
-def run_agent(
-    command,
-    extra_args,
-    cwd,
-    env,
-    queue_file,
-    agent,
-    no_restart,
-    start_watcher,
-    strip_env=None,
-    pid_holder=None,
-    session_name=None,
-    inject_env=None,
-    detached=False,
-):
-    """Run agent inside a tmux session, inject via tmux send-keys."""
-    _check_tmux()
-
-    session_name = session_name or f"agentchattr-{agent}"
-    agent_cmd = " ".join(
-        [shlex.quote(command)] + [shlex.quote(a) for a in extra_args]
-    )
+def build_agent_command(command, args, strip_env=None, inject_env=None,
+                        exit_code_file=None) -> str:
+    """Shell command that tmux runs for the agent CLI."""
+    agent_cmd = " ".join([shlex.quote(command)] + [shlex.quote(a) for a in args])
 
     # Build env(1) prefix for the command INSIDE the tmux session.
     # subprocess.run(env=...) only affects the tmux client binary — the
@@ -181,8 +190,64 @@ def run_agent(
     if env_parts:
         agent_cmd = f"env {' '.join(env_parts)} {agent_cmd}"
 
+    if exit_code_file:
+        # Record the CLI's exit code (the crash-recovery policy needs it). Run
+        # under sh so `$?` works whatever shell tmux is configured with.
+        record = f"{agent_cmd}; echo $? > {shlex.quote(str(exit_code_file))}"
+        agent_cmd = f"sh -c {shlex.quote(record)}"
+    return agent_cmd
+
+
+def read_exit_code(exit_code_file) -> int | None:
+    """The recorded exit code, or None (killed with the session, or not recorded)."""
+    if not exit_code_file:
+        return None
+    try:
+        return int(Path(exit_code_file).read_text("utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def run_agent(
+    command,
+    extra_args,
+    cwd,
+    env,
+    queue_file,
+    agent,
+    no_restart,
+    start_watcher,
+    strip_env=None,
+    pid_holder=None,
+    session_name=None,
+    inject_env=None,
+    detached=False,
+    launch_args_fn=None,
+    on_exit_fn=None,
+    exit_code_file=None,
+):
+    """Run agent inside a tmux session, inject via tmux send-keys.
+
+    launch_args_fn(extra_args) -> args for each (re)launch (e.g. resume a session);
+    on_exit_fn(exit_code, uptime_seconds) -> seconds to wait before relaunching.
+    """
+    _check_tmux()
+
+    session_name = session_name or f"agentchattr-{agent}"
+
+    def _restart_delay(started: float) -> float:
+        exit_code = read_exit_code(exit_code_file)
+        code_text = f" (code {exit_code})" if exit_code is not None else ""
+        print(f"\n  {agent.capitalize()} exited{code_text}.")
+        if on_exit_fn is None:
+            return 3
+        try:
+            return on_exit_fn(exit_code, time.time() - started)
+        except Exception as exc:
+            print(f"  Restart policy failed ({exc}); restarting fresh.")
+            return 3
+
     # Resolve cwd to absolute path (tmux -c needs it)
-    from pathlib import Path
     abs_cwd = str(Path(cwd).resolve())
 
     # Wire up injection with the tmux session name
@@ -201,6 +266,12 @@ def run_agent(
                 capture_output=True,
             )
 
+            args = launch_args_fn(extra_args) if launch_args_fn else extra_args
+            agent_cmd = build_agent_command(command, args, strip_env, inject_env, exit_code_file)
+            if exit_code_file:
+                Path(exit_code_file).unlink(missing_ok=True)
+            started = time.time()
+
             # Create tmux session running the agent CLI
             result = subprocess.run(
                 ["tmux", "new-session", "-d", "-s", session_name,
@@ -218,9 +289,9 @@ def run_agent(
                     time.sleep(1)
                 if no_restart:
                     break
-                print(f"\n  {agent.capitalize()} exited.")
-                print(f"  Restarting in 3s... (Ctrl+C to quit)")
-                time.sleep(3)
+                delay = _restart_delay(started)
+                print(f"  Restarting in {delay:g}s... (Ctrl+C to quit)")
+                time.sleep(delay)
                 continue
 
             # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
@@ -240,9 +311,9 @@ def run_agent(
             if no_restart:
                 break
 
-            print(f"\n  {agent.capitalize()} exited.")
-            print(f"  Restarting in 3s... (Ctrl+C to quit)")
-            time.sleep(3)
+            delay = _restart_delay(started)
+            print(f"  Restarting in {delay:g}s... (Ctrl+C to quit)")
+            time.sleep(delay)
         except KeyboardInterrupt:
             # Kill the tmux session on Ctrl+C
             subprocess.run(

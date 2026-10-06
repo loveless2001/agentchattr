@@ -298,8 +298,33 @@ Wrapper lifecycle:
    renames.
 5. Start a queue watcher that polls `data/{name}_queue.jsonl`.
 6. Start an activity monitor that reports screen/output changes.
-7. Launch the provider CLI through the platform runner.
-8. Deregister on shutdown.
+7. Claude/Codex on Mac/Linux: start a session monitor and crash-recovery
+   policy (below).
+8. Launch the provider CLI through the platform runner; relaunch it when it
+   exits.
+9. Deregister on shutdown.
+
+Session monitor and crash recovery (`agent_session_monitor.py`,
+`agent_transcript_readers.py`, `agent_crash_recovery.py`):
+
+- Claude gets a `--settings` file with a `SessionStart` hook
+  (`agent_session_hook.py`) that appends `{session_id, transcript_path,
+  source}` to `provider-config/{name}-session-events.jsonl` (path passed in
+  `AGENTCHATTR_SESSION_EVENTS`). Codex's rollout is found among the open files
+  of the tmux pane's process tree (`/proc/<pid>/fd`, Linux), skipping
+  sub-agent rollouts.
+- The monitor tails that transcript and posts to
+  `/api/agent_session/{name}`: `context` (tokens, window) when it moves or
+  every 60 s, `compact` on a compaction, `clear` on a new session while the
+  CLI keeps running.
+- tmux runs the CLI as `sh -c '<cli>; echo $? > {name}-exit-code'`. On exit
+  the policy picks the next launch: code 0/130/143 → fresh; anything else
+  (or no code) → resume the monitor's last session id, unless the launch was
+  itself a resume that crashed within 120 s.
+  It posts a `restart` event and, after a crash, queues a nudge prompt (not
+  after 3 crashes in 15 min, when relaunches also back off to 30 s). After a
+  Claude resume the wrapper answers the "Resume from summary" dialog with its
+  default.
 
 Provider MCP injection:
 
@@ -401,6 +426,8 @@ Key REST endpoints in `app.py`:
 - `POST /api/deregister/{name}`: wrapper deregistration.
 - `POST /api/label/{name}`: rename agent identity/label.
 - `POST /api/heartbeat/{agent_name}`: presence and activity heartbeat.
+- `POST /api/agent_session/{agent_name}`: wrapper-reported session events
+  (`context`, `compact`, `clear`, `restart`; agent bearer token, loopback).
 - `GET /api/platform`: browser path-format helper.
 - `POST /api/open-path`: open local paths in native file manager.
 - `GET/POST/DELETE /api/sessions...`: session templates and runs.
@@ -624,7 +651,8 @@ channel's chat history.
   channel's raw history; queries over 200 chars or with nested quantifiers like `(a+)+` are
   rejected, since Python's `re` cannot time out).
 - `chat_read` prepends the header on an agent's first read of a channel (no
-  cursor yet); `chat_resync` always does.
+  cursor yet), and once after a wrapper-reported compaction (cursor kept);
+  `chat_resync` always does.
 - On load, a tree whose leaves no longer match the chat log (a message lost
   to a torn line, or restored by hand) is rebuilt; nodes covering the same
   messages keep their lines.
@@ -731,7 +759,8 @@ Under `data_dir`, usually `./data`:
 - `channel_agent_bindings.json`: channel-to-instance bindings.
 - `{agent}_queue.jsonl`: per-agent trigger queue files.
 - `{agent}_recovered`: wrapper recovery flag files.
-- `provider-config/`: generated MCP config files.
+- `provider-config/`: generated MCP config files, Claude session-hook settings
+  and events (`{name}-session-*.json[l]`), CLI exit codes (`{name}-exit-code`).
 - `launcher-logs/`: server-managed wrapper logs.
 
 Uploads are stored under the configured upload directory, usually `./uploads`.

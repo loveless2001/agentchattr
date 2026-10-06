@@ -1695,6 +1695,39 @@ const _ROLE_EMOJI = {
     'chaos gremlin': '😈', 'red team': '🛡️', 'roast': '🔥', 'hype': '🎉',
 };
 
+function _formatTokens(n) {
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+    if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+    return String(n);
+}
+
+// Context-window usage reported by the agent's wrapper: a small percentage on
+// the pill, details (tokens, compactions) in the tooltip.
+function _syncPillContext(pill, ctx) {
+    let badge = pill.querySelector('.status-ctx');
+    if (!ctx || ctx.tokens == null) {
+        if (badge) badge.remove();
+        return;
+    }
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'status-ctx';
+        pill.appendChild(badge);
+    }
+    const pct = ctx.pct;
+    badge.textContent = pct != null ? `${Math.round(pct)}%` : _formatTokens(ctx.tokens);
+    badge.classList.toggle('high', pct != null && pct >= 80);
+    let detail = `context ${_formatTokens(ctx.tokens)}`;
+    if (ctx.window) detail += ` / ${_formatTokens(ctx.window)} (${Math.round(pct)}%)`;
+    if (ctx.compactions) {
+        detail += ` · compacted ${ctx.compactions}×`;
+        if (ctx.last_compact_at) {
+            detail += `, last ${new Date(ctx.last_compact_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        }
+    }
+    pill.title += `\n${detail}`;
+}
+
 function updateStatus(data) {
     _latestStatusData = data || {};
     const channelStatus = _latestStatusData._channels?.[activeChannel] || {};
@@ -1721,6 +1754,7 @@ function updateStatus(data) {
         if (info.color) pill.style.setProperty('--agent-color', info.color);
         if (info.target) pill.title = `@${name} (${info.target} in #${activeChannel})`;
         else pill.title = `@${name} (#${activeChannel})`;
+        _syncPillContext(pill, info.context);
 
         // Track role (displayed on bubbles, not on pill)
         if (info.role !== undefined) {

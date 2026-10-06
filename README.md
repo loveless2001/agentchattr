@@ -19,6 +19,7 @@ If you want the baseline version, start there. This branch currently carries add
 - responsive UI refinements and pagination for visible channel history
 - automatic per-channel [summary trees](#channel-summaries) (OptChat-style, written in the background by Codex Luna): a fresh agent starts from a compact summary of the channel's history and zooms in on demand
 - a crash-safe chat log: rewrites are atomic, and a line torn by a crash mid-save is [repaired on load](#crash-safe-chat-log) instead of silently dropping messages
+- [agent crash recovery and context tracking](#agent-crash-recovery-and-context-tracking): a crashed Claude Code / Codex CLI comes back with its session resumed, status pills show context-window usage, and a compacted agent is re-grounded with the channel summary
 
 *This is an example of what a conversation might look like if you really messed up.*
 
@@ -157,6 +158,14 @@ Sessions are channel-scoped (one active per channel) and survive page refreshes.
 ### Activity indicators
 Status pills show a spinning border in each agent's color when that agent is actively working — so you can minimize the terminals and still know at a glance who's busy. Detection works by hashing the agent's terminal screen buffer every second: if anything changes (spinner, streaming text, tool output), the pill lights up. When the screen stops changing, it stops instantly. Cross-platform — Windows uses `ReadConsoleOutputW`, Mac/Linux uses `tmux capture-pane`.
 
+### Agent crash recovery and context tracking
+For Claude Code and Codex on Mac/Linux, the wrapper follows the CLI's own transcript (`~/.claude/projects/…` via a `SessionStart` hook it installs with `--settings`; `~/.codex/sessions/…` via the rollout file Codex keeps open) and reports to the server:
+
+- **Context usage** — the status pill shows how full the agent's context window is (amber from 80%); the tooltip has the token count and how often it compacted. Codex reports its window; for Claude it comes from `context_window` in the agent's config (default 1,000,000).
+- **Compaction** — after the CLI compacts its conversation, the agent's next read of the channel starts with the [channel summary](#channel-summaries) again. Its read cursor is kept, so no message is delivered twice.
+- **`/clear` or a new session** — the agent's read cursors are reset, so its next read is a fresh one (summary plus latest messages).
+- **Crash** — the wrapper records the CLI's exit code. A deliberate exit (code 0 e.g. `/exit`, 130 Ctrl-C, 143 SIGTERM) restarts a fresh session. Any other code — or none, if the CLI died with its tmux session — counts as a crash and restarts it with the session resumed (`claude --resume <id>`, `codex resume <id>`). If a resumed session crashes again within 2 minutes, the next start is fresh. A system notice tells the channel what happened, and the agent is prompted to check the channel and continue (unless that would repeat what crashed it). After 3 crashes in 15 minutes the prompt stops and restarts back off to 30 s. If Claude asks whether to resume from a summary (large session, cold cache), the wrapper picks the default, *Resume from summary*.
+
 ### Multi-instance agents
 Run multiple instances of the same provider by mentioning that provider in multiple channels, or by launching extra wrappers manually. Each instance auto-registers with its own identity, color, status pill, and @mention routing.
 
@@ -202,7 +211,7 @@ Click the mic button (Chrome/Edge) to dictate messages instead of typing. Useful
 ### Channel summaries
 Each channel keeps an automatic summary tree of its chat history, modeled on [OptMem](https://github.com/VictorTaelin/OptMem) and its successor [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): every chat message becomes one line (a short message is kept word for word, a long one is compressed), and pairs of lines merge into a parent line, recursively (two lines that still fit in 512 bytes together are simply kept). Nobody has to ask for a summary and nothing is posted to the timeline.
 
-When an agent first reads a channel in a fresh session (or calls `chat_resync`), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` (or `#137` for a single message) — followed by the latest messages. A newly registered instance always starts with no read cursors, so it gets the summary even when it reuses an earlier instance's name. From there the agent can dig in with `chat_summary`:
+When an agent first reads a channel in a fresh session (or calls `chat_resync`, or reads after its context was [compacted](#agent-crash-recovery-and-context-tracking)), the read starts with the summary — older history in a few coarse lines, recent history in more detail, each line tagged with a block id like `#120-151` (or `#137` for a single message) — followed by the latest messages. A newly registered instance always starts with no read cursors, so it gets the summary even when it reuses an earlier instance's name. From there the agent can dig in with `chat_summary`:
 
 - `action='zoom', block='120-151'` expands a line into its two halves, down to single messages
 - `action='zoom', block='137'` shows message #137 whole, with the messages around it
@@ -450,7 +459,7 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 AGENTCHATTR_TEST_LUNA=1 .venv/bin/python -m unittest tests.test_e2e_server   # real Codex Luna compressor
 ```
 
-Functional, integration, and end-to-end tests (macOS/Linux): the server log cap, chat log repair, the summary tree with its compressor workers, and the real server driven over HTTP and MCP on free ports with a temp config. The end-to-end tests use a private tmux socket, so they never touch running agent sessions. Summaries are written by a stand-in CLI unless `AGENTCHATTR_TEST_LUNA=1` is set.
+Functional, integration, and end-to-end tests (macOS/Linux): the server log cap, chat log repair, the summary tree with its compressor workers, transcript tracking and the crash-restart policy, and the real server driven over HTTP and MCP on free ports with a temp config. The end-to-end tests use a private tmux socket, so they never touch running agent sessions. Summaries are written by a stand-in CLI unless `AGENTCHATTR_TEST_LUNA=1` is set.
 
 ## Architecture
 
@@ -498,6 +507,11 @@ Functional, integration, and end-to-end tests (macOS/Linux): the server log cap,
 | `session_templates/` | Built-in session templates (JSON) — code review, debate, design critique, planning |
 | `router.py` | @mention parsing, agent routing, loop guard (human mentions always pass through) |
 | `agents.py` | Writes trigger queue files for wrapper to pick up |
+| `agent_session_monitor.py` | Wrapper thread: finds the CLI's transcript, reports context usage, compactions and `/clear` |
+| `agent_transcript_readers.py` | Incremental Claude Code / Codex transcript readers — context tokens, compaction events |
+| `agent_session_hook.py` | Claude Code `SessionStart` hook that tells the wrapper which transcript is its agent's |
+| `agent_crash_recovery.py` | Restart policy — resume vs fresh session after an exit, crash-loop guard, nudge prompt |
+| `agent_session_state.py` | Server side of session events — context usage, summary after compaction, cursor resets |
 | `mcp_bridge.py` | MCP tool definitions (`chat_send`, `chat_read`, `chat_claim`, etc.) |
 | `mcp_proxy.py` | Per-instance MCP proxy — injects sender identity into all tool calls |
 | `wrapper.py` | Cross-platform dispatcher — registration, auto-trigger, heartbeat, activity monitor |

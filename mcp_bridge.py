@@ -16,6 +16,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 
+import agent_session_state
+
 log = logging.getLogger(__name__)
 
 # Shared state — set by run.py before starting
@@ -93,8 +95,9 @@ _MCP_INSTRUCTIONS = (
     "Channel summaries are written automatically in the background — never write or post summaries yourself. "
     "Your first chat_read of a channel in a fresh session (and every chat_resync) starts with a summary of the "
     "channel's history: older history compressed, recent history in more detail, each line tagged with a block id "
-    "like #120-151, followed by the latest messages. If your context was cleared or compacted, call "
-    "chat_resync(channel=...) to get it again. To dig deeper: chat_summary(action='zoom', block='120-151') expands "
+    "like #120-151, followed by the latest messages. After your context is compacted, or your CLI restarts in a "
+    "fresh session, your next chat_read of the channel starts with the summary again on its own; "
+    "chat_resync(channel=...) fetches it on demand. To dig deeper: chat_summary(action='zoom', block='120-151') expands "
     "a line, chat_summary(action='zoom', block='<message id>') shows one message whole with its neighbours, and "
     "chat_summary(action='recall', query='<regex>') searches the channel's raw history. "
     "Only messages posted to chat are remembered, so put lasting findings, decisions and results in your replies.\n\n"
@@ -476,6 +479,7 @@ def migrate_identity(old_name: str, new_name: str):
         _roles[new_name] = _roles.pop(old_name)
         _save_roles()
     _save_cursors()
+    agent_session_state.rename(old_name, new_name)
 
 
 def purge_identity(name: str):
@@ -490,6 +494,7 @@ def purge_identity(name: str):
         del _roles[name]
         _save_roles()
     _save_cursors()
+    agent_session_state.forget(name)
 
 
 def reset_cursors(name: str):
@@ -544,7 +549,8 @@ def chat_read(
     - Pass since_id to override and read from a specific point.
     - Omit sender to always get the last `limit` messages (no cursor).
     - Pass channel to filter by channel name (default: all channels).
-    - The first read of a channel (no cursor yet) starts with the channel summary.
+    - The first read of a channel (no cursor yet) starts with the channel summary,
+      and so does the next read after your context was compacted.
     - Pass job_id to read a specific job. Job reads return a header entry first,
       including title and body, followed by the thread messages."""
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
@@ -624,7 +630,10 @@ def chat_read(
     elif sender:
         _empty_read_count[sender] = 0
 
-    if fresh and ch:
+    # Summary on a fresh read, and once after a compaction (the cursor is kept,
+    # so nothing already delivered comes back; the summary re-grounds the agent).
+    pending = bool(ch and sender and agent_session_state.take_summary_pending(sender))
+    if ch and (fresh or pending):
         serialized = _with_summary_header(ch, serialized)
 
     # Prepend identity breadcrumb if multi-instance
@@ -658,7 +667,10 @@ def chat_resync(
     msgs = store.get_recent(limit, channel=ch)
     _update_cursor(sender, msgs, ch)
     serialized = _serialize_messages(msgs)
-    return _with_summary_header(ch, serialized) if ch else serialized
+    if not ch:
+        return serialized
+    agent_session_state.clear_summary_pending(sender)
+    return _with_summary_header(ch, serialized)
 
 
 def _with_summary_header(channel: str, body: str) -> str:

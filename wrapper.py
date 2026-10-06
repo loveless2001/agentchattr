@@ -15,6 +15,8 @@ How it works:
   2. Watches the queue file in the background for @mentions from the chat room.
   3. When triggered, injects "mcp read #channel - you were mentioned, take appropriate action".
   4. The agent picks up the prompt as if the user typed it.
+  5. Claude Code / Codex (Mac/Linux): follows the CLI's transcript to report
+     context usage and compactions, and resumes the session after a crash.
 """
 
 import json
@@ -24,6 +26,15 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+from agent_crash_recovery import CrashRecoveryPolicy, nudge_prompt
+from agent_session_monitor import (
+    DEFAULT_CONTEXT_WINDOWS,
+    SESSION_EVENTS_ENV,
+    SUPPORTED_PROVIDERS,
+    AgentSessionMonitor,
+    install_claude_session_hook,
+)
 
 ROOT = Path(__file__).parent
 
@@ -507,6 +518,101 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
 
 # ---------------------------------------------------------------------------
+# Session tracking + crash recovery (Claude Code / Codex, Mac/Linux)
+# ---------------------------------------------------------------------------
+
+def _setup_session_recovery(*, agent, agent_cfg, instance_name, data_dir, tmux_session,
+                            channel, server_port, get_identity, get_token,
+                            launch_args, inject_env):
+    """Follow the CLI's transcript (context usage, compactions, /clear) and,
+    when the CLI crashes, relaunch it with its session resumed.
+
+    Returns (run_agent kwargs, launch_args, inject_env) — Claude gets a
+    SessionStart hook through --settings and an env var naming its events file.
+    """
+    import urllib.request
+    from wrapper_unix import accept_resume_dialog
+
+    provider_dir = data_dir / "provider-config"
+    events_file = None
+    if agent == "claude":
+        settings_file, events_file = install_claude_session_hook(provider_dir, instance_name)
+        launch_args = [*launch_args, "--settings", str(settings_file)]
+        inject_env = {**inject_env, SESSION_EVENTS_ENV: str(events_file)}
+
+    def report(body: dict):
+        current_name, _ = get_identity()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server_port}/api/agent_session/{current_name}",
+            method="POST",
+            data=json.dumps(body).encode(),
+            headers=_auth_headers(get_token(), include_json=True),
+        )
+        urllib.request.urlopen(req, timeout=5).close()
+
+    monitor = AgentSessionMonitor(
+        agent,
+        report_fn=report,
+        events_file=events_file,
+        tmux_session=tmux_session,
+        context_window=agent_cfg.get("context_window") or DEFAULT_CONTEXT_WINDOWS.get(agent),
+    )
+    monitor.start()
+    policy = CrashRecoveryPolicy(agent, lambda: monitor.session_id)
+    launch_count = [0]  # bumped per launch; follow-up work for a superseded launch is dropped
+
+    def launch_args_fn(base_args):
+        launch_count[0] += 1
+        return policy.launch_args(base_args)
+
+    def after_relaunch(decision, launch_no):
+        """Once relaunch number launch_no is up: answer Claude's resume dialog, then nudge."""
+        current = lambda: launch_count[0] == launch_no
+        deadline = time.time() + decision.delay + 30
+        while launch_count[0] < launch_no and time.time() < deadline:
+            time.sleep(0.5)
+        if not current():
+            return
+        time.sleep(2)  # let the CLI start drawing
+        if decision.resumed and agent == "claude":
+            if accept_resume_dialog(tmux_session, still_current=current):
+                # Resuming from a summary compacts the session.
+                try:
+                    report({"event": "compact"})
+                except Exception:
+                    pass
+        if decision.nudge and current():
+            _, queue_file = get_identity()
+            entry = {"channel": channel, "prompt": nudge_prompt(channel, decision)}
+            with open(queue_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+
+    def on_exit_fn(exit_code, uptime):
+        decision = policy.on_exit(exit_code, uptime)  # reads the session id first
+        monitor.mark_launch()
+        if decision.resumed:
+            print(f"  Crashed — resuming session {decision.resume_session_id}.")
+        elif decision.crashed:
+            print("  Crashed — starting a fresh session.")
+        try:
+            report({"event": "restart", "exit_code": exit_code, "crashed": decision.crashed,
+                    "resumed": decision.resumed, "session_id": decision.resume_session_id})
+        except Exception as exc:
+            print(f"  Could not report the restart to the server ({exc}).")
+        if decision.resumed or decision.nudge:
+            threading.Thread(target=after_relaunch, args=(decision, launch_count[0] + 1),
+                             daemon=True).start()
+        return decision.delay
+
+    run_kwargs = {
+        "launch_args_fn": launch_args_fn,
+        "on_exit_fn": on_exit_fn,
+        "exit_code_file": provider_dir / f"{instance_name}-exit-code",
+    }
+    return run_kwargs, launch_args, inject_env
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -836,6 +942,22 @@ def main():
         unix_session_name = args.session_name or f"agentchattr-{assigned_name}"
         _set_activity_checker(get_activity_checker(unix_session_name, trigger_flag=_trigger_flag))
 
+    session_kwargs = {}
+    if sys.platform != "win32" and agent in SUPPORTED_PROVIDERS:
+        session_kwargs, launch_args, inject_env = _setup_session_recovery(
+            agent=agent,
+            agent_cfg=agent_cfg,
+            instance_name=assigned_name,
+            data_dir=data_dir,
+            tmux_session=unix_session_name,
+            channel=args.channel or "general",
+            server_port=server_port,
+            get_identity=get_identity,
+            get_token=get_token,
+            launch_args=launch_args,
+            inject_env=inject_env,
+        )
+
     run_kwargs = dict(
         command=command,
         extra_args=launch_args,
@@ -852,6 +974,7 @@ def main():
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
         run_kwargs["detached"] = args.detached
+        run_kwargs.update(session_kwargs)
 
     try:
         run_agent(**run_kwargs)

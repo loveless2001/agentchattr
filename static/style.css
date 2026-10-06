@@ -263,6 +263,16 @@ header h1 {
     transition: background 0.3s;
 }
 
+.status-ctx {
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+}
+
+.status-ctx.high {
+    color: var(--warning);
+}
+
 .status-pill.available .status-dot {
     background: var(--online);
 }

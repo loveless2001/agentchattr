@@ -32,6 +32,7 @@ from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 from server_launcher import ServerLauncher
 from attachment_processor import process_upload
+import agent_session_state
 from channel_bindings import ChannelBindings
 from download_links import DownloadLinkService
 
@@ -259,6 +260,7 @@ def _channel_base_status(channel: str) -> dict:
             "color": cfg.get("color", "#888"),
             "role": mcp_bridge.get_role(target or base),
             "target": target or "",
+            "context": agent_session_state.get_context(target) if target else {},
         }
     return result
 
@@ -383,7 +385,8 @@ def _install_security_middleware(token: str, cfg: dict):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
-            if path.startswith(("/api/register", "/api/deregister/", "/api/heartbeat/")):
+            if path.startswith(("/api/register", "/api/deregister/", "/api/heartbeat/",
+                                "/api/agent_session/")):
                 client_ip = request.client.host if request.client else ""
                 if client_ip not in ("127.0.0.1", "::1", "localhost"):
                     return JSONResponse(
@@ -2794,6 +2797,36 @@ async def heartbeat(agent_name: str, request: Request):
                 with mcp_bridge._presence_lock:
                     mcp_bridge._presence[canonical] = now
     return resp
+
+
+@app.post("/api/agent_session/{agent_name}")
+async def agent_session_event(agent_name: str, request: Request):
+    """Wrapper reports what happened to its agent CLI's session: context usage,
+    a compaction, a cleared session or a restart (see agent_session_state.py)."""
+    import mcp_bridge
+    auth_inst = _resolve_authenticated_agent(request)
+    if not auth_inst:
+        return JSONResponse({"error": "authenticated agent session required"}, status_code=403)
+    name = auth_inst["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+
+    def post_notice(text: str):
+        store.add("system", text, channel=_channel_for_agent_instance(name))
+
+    try:
+        changed = agent_session_state.apply_event(
+            name, body, reset_cursors=mcp_bridge.reset_cursors, post_notice=post_notice,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if changed:
+        await broadcast_status()
+    return {"ok": True, "name": name}
 
 
 # --- Open agent session in terminal ---
