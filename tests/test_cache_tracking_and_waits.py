@@ -1,6 +1,7 @@
 """Prompt-cache tracking: transcript parsing (Claude Code, Codex), the wrapper
 monitor's report and the server's status view. Registered waits (chat_wait):
-the store, each condition, validation and persistence.
+the store, each condition, validation and persistence. The cache keepalive
+for waiting Claude agents: each of its gates.
 
 Transcript lines are shaped like the real Claude Code / Codex files.
 """
@@ -18,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 import agent_session_state  # noqa: E402
 import agent_wait_conditions  # noqa: E402
+from agent_cache_keepalive import CacheKeepalive, KeepaliveConfig  # noqa: E402
 from agent_waits import MAX_WAITS_PER_AGENT, WaitStore  # noqa: E402
 from agent_session_monitor import AgentSessionMonitor, install_claude_session_hook  # noqa: E402
 from agent_transcript_readers import ClaudeTranscriptParser, CodexRolloutParser  # noqa: E402
@@ -146,6 +148,14 @@ class CacheReportTest(unittest.TestCase):
                 "last": {**cache["last"], "cached": 0, "written": 100_000, "cold": True}}
         self.assertTrue(self.apply(event="context", tokens=100_600, window=1_000_000, cache=cold))
         self.assertTrue(agent_session_state.get_context("agent")["cache"]["last_cold"])
+
+    def test_cache_snapshot_for_the_keepalive(self):
+        self.assertIsNone(agent_session_state.cache_snapshot("agent"))
+        cache = {"prompt": 10, "cached": 5, "turns": 1, "ttl": "1h",
+                 "last": {"prompt": 10, "cached": 5, "at": 1_791_388_800.0}}
+        self.apply(event="context", tokens=460_000, window=1_000_000, cache=cache)
+        self.assertEqual(agent_session_state.cache_snapshot("agent"),
+                         {"tokens": 460_000, "ttl": "1h", "last_at": 1_791_388_800.0})
 
     def test_malformed_cache_values_are_dropped(self):
         self.apply(event="context", tokens=1_000, window=1_000_000,
@@ -337,6 +347,61 @@ class WaitStoreTest(unittest.TestCase):
         self.assertIn("wait #2 (check in) is over: timed out after 30m", prompt)  # both, one prompt
         self.assertIn("#lab", prompt)
         self.assertIn("logs a line containing 'FINISHED'", agent_wait_conditions.describe(wait))
+
+
+class CacheKeepaliveTest(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        self.keepalive = CacheKeepalive(KeepaliveConfig())
+        self.waits = {"claude-lab": [{"note": "train run 7", "created_at": self.NOW - 3 * 3600}]}
+        self.snap = {"tokens": 460_000, "ttl": "1h", "last_at": self.NOW - 52 * 60}
+        self.busy = set()
+
+    def due(self, keepalive=None, **snap_changes):
+        snap = {**self.snap, **snap_changes}
+        return (keepalive or self.keepalive).due(self.NOW, self.waits, lambda agent: snap,
+                                                 lambda agent: agent not in self.busy)
+
+    def test_a_waiting_agent_is_pinged_once_per_idle_stretch(self):
+        [(agent, text)] = self.due()
+        self.assertEqual(agent, "claude-lab")
+        self.assertIn("Still waiting on: train run 7", text)
+        self.assertEqual(self.due(), [])  # no new model request since the ping was sent
+        self.assertEqual(len(self.due(last_at=self.NOW - 50.5 * 60)), 1)  # the next stretch
+
+    def test_no_ping_unless_every_gate_holds(self):
+        off = CacheKeepalive(KeepaliveConfig(scope="off"))
+        cases = {
+            "scope off": dict(keepalive=off),
+            "5-minute cache": dict(ttl="5m"),
+            "lifetime unknown (Codex)": dict(ttl=None),
+            "too early": dict(last_at=self.NOW - 49 * 60),
+            "cache already expired": dict(last_at=self.NOW - 59 * 60),
+            "small context": dict(tokens=40_000),
+        }
+        for label, changes in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.due(**changes), [])
+
+    def test_no_ping_without_a_fresh_wait(self):
+        self.waits = {}
+        self.assertEqual(self.due(), [])
+        self.waits = {"claude-lab": [{"note": "old", "created_at": self.NOW - 25 * 3600}]}
+        self.assertEqual(self.due(), [])  # past max_hours
+
+    def test_a_busy_agent_is_pinged_once_it_is_idle(self):
+        self.busy.add("claude-lab")
+        self.assertEqual(self.due(), [])
+        self.busy.clear()
+        self.assertEqual(len(self.due()), 1)
+
+    def test_config(self):
+        self.assertEqual(KeepaliveConfig.from_config(None), KeepaliveConfig())
+        self.assertEqual(KeepaliveConfig.from_config({"scope": "idle"}).scope, "off")
+        self.assertEqual(KeepaliveConfig.from_config({"idle_minutes": 90}).idle_minutes, 55)
+        self.assertEqual(KeepaliveConfig.from_config({"scope": "OFF", "max_hours": "x"}),
+                         KeepaliveConfig(scope="off"))
 
 
 if __name__ == "__main__":

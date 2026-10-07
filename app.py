@@ -34,6 +34,7 @@ from server_launcher import ServerLauncher
 from attachment_processor import process_upload
 import agent_session_state
 import agent_wait_conditions
+from agent_cache_keepalive import CacheKeepalive, KeepaliveConfig
 from agent_waits import WaitStore
 from channel_bindings import ChannelBindings
 from download_links import DownloadLinkService
@@ -50,6 +51,7 @@ summaries: SummaryStore | None = None
 jobs: JobStore | None = None
 schedules: ScheduleStore | None = None
 waits: WaitStore | None = None
+cache_keepalive: CacheKeepalive | None = None
 router: Router | None = None
 agents: AgentTrigger | None = None
 registry: RuntimeRegistry | None = None
@@ -447,7 +449,7 @@ def _post_chat_log_damage_notice(log_path: Path):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, waits, router, agents, registry
+    global store, rules, summaries, jobs, schedules, waits, cache_keepalive, router, agents, registry
     global session_store, session_engine, launcher, channel_bindings, download_links, config
     config = cfg
     # --- Security: store the session token and install middleware ---
@@ -498,6 +500,7 @@ def configure(cfg: dict, session_token: str = ""):
     schedules = ScheduleStore(str(Path(data_dir) / "schedules.json"))
     schedules.on_change(_on_schedule_change)
     waits = WaitStore(Path(data_dir) / "waits.json", on_change=_on_waits_change)
+    cache_keepalive = CacheKeepalive(KeepaliveConfig.from_config(cfg.get("cache_keepalive")))
 
     max_hops = cfg.get("routing", {}).get("max_agent_hops", 4)
 
@@ -718,7 +721,8 @@ def configure(cfg: dict, session_token: str = ""):
 
     threading.Thread(target=_schedule_runner, daemon=True).start()
 
-    # --- Wait runner: ends registered waits (chat_wait) and wakes their agents ---
+    # --- Wait runner: ends registered waits (chat_wait) and wakes their agents,
+    #     and keeps the prompt cache of waiting Claude agents warm ---
     def _wait_runner():
         import time as _time
         while True:
@@ -736,7 +740,9 @@ WAIT_CHECK_SECONDS = 5
 
 
 def _run_waits():
-    """End the waits that are over: a notice in the channel, a wake prompt to the agent."""
+    """End the waits that are over (a notice in the channel, a wake prompt to the
+    agent), then ping waiting agents whose prompt cache is about to expire."""
+    import time
     import mcp_bridge
     online = lambda name: agents.is_available(name) and mcp_bridge.is_online(name)
     wakes: dict[tuple[str, str], list] = {}  # one prompt per agent and channel
@@ -752,6 +758,11 @@ def _run_waits():
     for (name, channel), ended in wakes.items():
         agents.trigger_sync(name, channel=channel,
                             prompt=agent_wait_conditions.wake_prompt(ended))
+    ready = lambda name: online(name) and not mcp_bridge.is_active(name)
+    for name, text in cache_keepalive.due(time.time(), waits.by_agent(),
+                                          agent_session_state.cache_snapshot, ready):
+        log.info("Cache keepalive: pinging %s", name)
+        agents.trigger_sync(name, inject_text=text)
 
 
 # --- Store → WebSocket bridge ---

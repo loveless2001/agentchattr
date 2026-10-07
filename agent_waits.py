@@ -128,6 +128,13 @@ class WaitStore:
         with self._lock:
             return [dict(w) for w in self._waits if w["agent"] == agent]
 
+    def by_agent(self) -> dict[str, list[dict]]:
+        with self._lock:
+            grouped: dict[str, list[dict]] = {}
+            for wait in self._waits:
+                grouped.setdefault(wait["agent"], []).append(dict(wait))
+            return grouped
+
     def pop_due(self, now: float | None = None) -> list[tuple[dict, str]]:
         """Remove and return the waits that are over, with the reason.
 

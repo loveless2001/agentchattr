@@ -152,6 +152,16 @@ def get_context(name: str) -> dict:
     return view
 
 
+def cache_snapshot(name: str) -> dict | None:
+    """Context size, cache lifetime and last model request time (cache keepalive)."""
+    with _lock:
+        info = _sessions.get(name) or {}
+        cache = info.get("cache")
+        if not cache:
+            return None
+        return {"tokens": info.get("tokens"), "ttl": cache["ttl"], "last_at": cache["last"]["at"]}
+
+
 def rename(old_name: str, new_name: str):
     with _lock:
         if old_name in _sessions:

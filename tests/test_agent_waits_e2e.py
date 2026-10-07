@@ -60,6 +60,28 @@ class AgentWaitsE2E(unittest.TestCase):
                             for m in msgs))
         self.assertIn("no active waits", self.server.mcp(self.agent, "chat_wait_cancel"))
 
+    def test_keepalive_pings_a_waiting_agent_before_its_cache_expires(self):
+        self.server.mcp(self.agent, "chat_wait", note="train run 8", timeout_minutes=600)
+        last_request = time.time() - 52 * 60  # the 1h cache has ~8 minutes left
+        cache = {"prompt": 9_000_000, "cached": 8_800_000, "written": 100_000, "turns": 40,
+                 "cold_turns": 0, "ttl": "1h",
+                 "last": {"prompt": 460_000, "cached": 455_000, "written": 2_000,
+                          "at": last_request, "cold": False}}
+        self.server.http("POST", f"/api/agent_session/{self.agent['name']}",
+                         {"event": "context", "tokens": 460_000, "window": 1_000_000,
+                          "cache": cache}, bearer=self.agent["token"])
+
+        queue = self.server.data / f"{self.agent['name']}_queue.jsonl"
+        pings = []
+        deadline = time.time() + 20
+        while time.time() < deadline and not pings:
+            lines = queue.read_text().splitlines() if queue.exists() else []
+            pings = [json.loads(l) for l in lines if "agentchattr keepalive" in l]
+            time.sleep(0.2)
+        self.assertEqual(len(pings), 1)
+        self.assertIn("Still waiting on: train run 8", pings[0]["inject_text"])
+        self.server.mcp(self.agent, "chat_wait_cancel")
+
     def test_an_invalid_wait_is_refused(self):
         reply = self.server.mcp(self.agent, "chat_wait", note="x", path="relative/train.log")
         self.assertEqual(reply, "Error: path must be absolute.")

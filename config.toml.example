@@ -70,6 +70,17 @@ extra_ttl_per_10mb_seconds = 60
 max_file_mb = 512
 max_links_per_message = 8
 
+# --- Prompt-cache keepalive ---
+# While a Claude Code agent waits on a registered wait (chat_wait), ping it just
+# before its 1-hour prompt cache expires, so it wakes to a warm cache instead of
+# re-caching its whole context at 2x the input price. Each ping is one short turn.
+# Codex is never pinged (its cache lifetime is not reported or configurable).
+[cache_keepalive]
+scope = "waits"             # "off" | "waits"
+idle_minutes = 50           # ping after this long without a model request (5-55; the cache lasts 60)
+min_context_tokens = 50000  # smaller contexts are cheap to re-cache
+max_hours = 24              # stop pinging for waits older than this
+
 # --- MCP injection modes ---
 # By default, claude/codex/gemini/kimi use built-in MCP config injection.
 # For other CLI agents, set mcp_inject to tell the wrapper how to inject auth:
