@@ -2,7 +2,8 @@
 
 It finds the transcript of the CLI the wrapper launched, reads what the CLI
 appends, and reports to the server (via report_fn):
-  - context usage (event "context"), when it moves or once a minute;
+  - context usage and prompt-cache statistics (event "context"), when they
+    move or once a minute;
   - compactions (event "compact");
   - a new empty session while the CLI keeps running, e.g. /clear (event "clear").
 It also remembers the current session id, so a crashed CLI can be resumed
@@ -233,9 +234,9 @@ class AgentSessionMonitor:
             self._new_launch = False
         self._tail = TranscriptTail(path)
         self._parser = make_parser(self.provider)
-        # The existing end of the file sets the current usage; old compactions
-        # in it are history, not news.
-        for line in self._tail.read_existing_tail():
+        # The existing file sets the current usage and the session's cache
+        # totals; old compactions in it are history, not news.
+        for line in self._tail.read_existing():
             self._parser.feed(line)
         self._last_reported = None
         if cleared:
@@ -248,13 +249,16 @@ class AgentSessionMonitor:
         if tokens is None:
             return
         window = getattr(self._parser, "context_window", None) or self.context_window
-        current = (tokens, window)
+        cache = self._parser.cache.report()
+        current = (tokens, window, self._parser.cache.turns)
         now = time.time()
         if current == self._last_reported and now - self._last_report_at < REPORT_EVERY_SECONDS:
             return
-        self._report({"event": "context", "tokens": tokens, "window": window,
-                      "model": getattr(self._parser, "model", ""),
-                      "session_id": self.session_id})
+        body = {"event": "context", "tokens": tokens, "window": window,
+                "model": getattr(self._parser, "model", ""), "session_id": self.session_id}
+        if cache:
+            body["cache"] = cache
+        self._report(body)
         self._last_reported, self._last_report_at = current, now
 
     def _report(self, body: dict):

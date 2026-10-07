@@ -4,14 +4,16 @@ Wrappers follow their agent CLI's transcript and report what happens to the
 agent's context (see agent_session_monitor.py / agent_crash_recovery.py) via
 POST /api/agent_session/{name}. This module keeps the per-agent result:
 
-  - context usage (tokens in the model's context, its window, compactions),
-    shown on the agent's status pill;
+  - context usage (tokens in the model's context, its window, compactions)
+    and prompt-cache statistics, shown on the agent's status pill;
   - "summary pending": after a compaction the agent still remembers the chat,
     only less of it, so its next channel read keeps the cursor (no message is
     delivered twice) but starts with the channel summary to re-ground it.
 
 Events:
-  context  {tokens, window, model?}      update context usage
+  context  {tokens, window, model?, cache?}
+                                         update context usage / cache statistics
+                                         (cache: see agent_cache_stats.CacheStats.report)
   compact  {pre_tokens?, post_tokens?}   summary on the next channel read
   clear    {}                            new empty session: reset read cursors
   restart  {exit_code, crashed, resumed} fresh: reset cursors; crash: notice
@@ -42,22 +44,51 @@ def _int_or_none(value) -> int | None:
     return number if number >= 0 else None
 
 
-def set_context(name: str, tokens: int | None, window: int | None, model: str = "") -> bool:
-    """Record context usage. Returns True when the change is worth broadcasting."""
+def _clean_cache(raw) -> dict | None:
+    """Wrapper-reported cache statistics, reduced to known fields and safe values."""
+    if not isinstance(raw, dict):
+        return None
+    last = raw.get("last") if isinstance(raw.get("last"), dict) else {}
+    clean = {k: _int_or_none(raw.get(k)) or 0
+             for k in ("prompt", "cached", "written", "turns", "cold_turns")}
+    at = last.get("at")
+    clean["last"] = {
+        **{k: _int_or_none(last.get(k)) or 0 for k in ("prompt", "cached", "written")},
+        "at": float(at) if isinstance(at, (int, float)) and at > 0 else None,
+        "cold": bool(last.get("cold")),
+    }
+    clean["ttl"] = raw.get("ttl") if raw.get("ttl") in ("1h", "5m") else None
+    return clean
+
+
+def _pct(part: int, whole: int) -> float | None:
+    return round(100 * part / whole, 1) if whole else None
+
+
+def set_context(name: str, tokens: int | None, window: int | None, model: str = "",
+                cache: dict | None = None) -> bool:
+    """Record context usage (and cache statistics). Returns True when the change
+    is worth broadcasting."""
     if tokens is None:
         return False
+    cache = _clean_cache(cache)
     with _lock:
         info = _sessions.setdefault(name, {"compactions": 0})
         old_tokens, old_window = info.get("tokens"), info.get("window")
+        old_cold = (info.get("cache") or {}).get("cold_turns")
         info["tokens"] = tokens
         if window:
             info["window"] = window
         if model:
             info["model"] = model
+        if cache:
+            info["cache"] = cache
         info["updated_at"] = time.time()
         new_window = info.get("window")
     if old_tokens is None or old_window != new_window:
         return True
+    if cache and old_cold is not None and cache["cold_turns"] != old_cold:
+        return True  # a cache miss is news
     if not new_window:
         return abs(tokens - old_tokens) >= 1000
     return abs(tokens - old_tokens) / new_window >= _BROADCAST_STEP
@@ -106,6 +137,18 @@ def get_context(name: str) -> dict:
     }
     if info.get("last_compact_at"):
         view["last_compact_at"] = info["last_compact_at"]
+    cache = info.get("cache")
+    if cache and cache["prompt"]:
+        last = cache["last"]
+        view["cache"] = {
+            "session_pct": _pct(cache["cached"], cache["prompt"]),
+            "last_pct": _pct(last["cached"], last["prompt"]),
+            "turns": cache["turns"],
+            "cold_turns": cache["cold_turns"],
+            "last_cold": last["cold"],
+            "last_at": last["at"],
+            "ttl": cache["ttl"],
+        }
     return view
 
 
@@ -165,7 +208,8 @@ def apply_event(name: str, body: dict, *, reset_cursors, post_notice) -> bool:
 
     if event == "context":
         return set_context(name, _int_or_none(body.get("tokens")),
-                           _int_or_none(body.get("window")), str(body.get("model") or ""))
+                           _int_or_none(body.get("window")), str(body.get("model") or ""),
+                           body.get("cache"))
 
     if event == "compact":
         note_compaction(name, _int_or_none(body.get("pre_tokens")),

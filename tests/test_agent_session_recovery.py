@@ -79,14 +79,16 @@ class TranscriptTailTest(TempDirTest):
         self.assertEqual(tail.read_new(), ['{"b": 2}'])
         self.assertEqual(tail.read_new(), [])
 
-    def test_existing_tail_drops_the_cut_first_line_and_moves_to_the_end(self):
+    def test_existing_lines_stream_then_new_lines_follow(self):
         path = self.tmp / "t.jsonl"
         self.append(path, *(f'{{"n": {i}}}' for i in range(100)))
+        self.append(path, '{"n":', newline=False)  # a line still being written
         tail = TranscriptTail(path)
-        lines = tail.read_existing_tail(max_bytes=50)
-        self.assertTrue(lines and all(json.loads(l) for l in lines))  # no cut line
-        self.assertEqual(json.loads(lines[-1]), {"n": 99})
+        lines = list(tail.read_existing())
+        self.assertEqual([json.loads(l)["n"] for l in lines], list(range(100)))
         self.assertEqual(tail.read_new(), [])
+        self.append(path, ' 100}')
+        self.assertEqual(tail.read_new(), ['{"n": 100}'])
 
     def test_truncated_file_is_read_again_from_the_start(self):
         path = self.tmp / "t.jsonl"

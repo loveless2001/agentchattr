@@ -51,10 +51,16 @@ class AgentSessionEventsE2E(unittest.TestCase):
         self.assertNotIn(SUMMARY, self.read())
 
         # Context usage reaches the channel status the pills render.
-        self.event(event="context", tokens=500_000, window=1_000_000)
+        cache = {"prompt": 2_000_000, "cached": 1_900_000, "written": 50_000, "turns": 12,
+                 "cold_turns": 1, "ttl": "1h",
+                 "last": {"prompt": 500_000, "cached": 495_000, "written": 4_000,
+                          "at": 1_791_388_800.0, "cold": False}}
+        self.event(event="context", tokens=500_000, window=1_000_000, cache=cache)
         status = json.loads(self.server.http("GET", "/api/status"))
         context = status["_channels"]["general"]["claude"]["context"]
         self.assertEqual((context["pct"], context["compactions"]), (50.0, 1))
+        self.assertEqual((context["cache"]["session_pct"], context["cache"]["last_pct"],
+                          context["cache"]["cold_turns"]), (95.0, 99.0, 1))
 
         # A crash restarted in a fresh session: cursor reset, notice in the channel.
         self.event(event="restart", exit_code=137, crashed=True, resumed=False)

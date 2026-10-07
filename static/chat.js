@@ -1726,6 +1726,15 @@ function _syncPillContext(pill, ctx) {
         }
     }
     pill.title += `\n${detail}`;
+    const cache = ctx.cache;
+    if (cache && cache.session_pct != null) {
+        // Share of the prompt served from the provider's prompt cache.
+        let line = `cache ${Math.round(cache.session_pct)}%`;
+        if (cache.last_pct != null) line += ` · last turn ${Math.round(cache.last_pct)}%`;
+        if (cache.cold_turns) line += ` · ${cache.cold_turns} cold turn${cache.cold_turns === 1 ? '' : 's'}`;
+        if (cache.last_cold) line += ' (last turn missed the cache)';
+        pill.title += `\n${line}`;
+    }
 }
 
 function updateStatus(data) {
