@@ -20,6 +20,7 @@ If you want the baseline version, start there. This branch currently carries add
 - automatic per-channel [summary trees](#channel-summaries) (OptChat-style, written in the background by Codex Luna): a fresh agent starts from a compact summary of the channel's history and zooms in on demand
 - a crash-safe chat log: rewrites are atomic, and a line torn by a crash mid-save is [repaired on load](#crash-safe-chat-log) instead of silently dropping messages
 - [agent crash recovery and context tracking](#agent-crash-recovery-and-context-tracking): a crashed Claude Code / Codex CLI comes back with its session resumed, status pills show context-window usage, and a compacted agent is re-grounded with the channel summary
+- [waiting on long jobs](#waiting-on-long-jobs) and [prompt-cache tracking](#agent-crash-recovery-and-context-tracking): an agent parks on a training run or build with `chat_wait` (process exit, file, log line, timeout) and is woken when it ends, spending no tokens meanwhile; pills show prompt-cache hit rates, and a waiting Claude agent's 1-hour cache is kept warm
 
 *This is an example of what a conversation might look like if you really messed up.*
 
@@ -162,9 +163,30 @@ Status pills show a spinning border in each agent's color when that agent is act
 For Claude Code and Codex on Mac/Linux, the wrapper follows the CLI's own transcript (`~/.claude/projects/…` via a `SessionStart` hook it installs with `--settings`; `~/.codex/sessions/…` via the rollout file Codex keeps open) and reports to the server:
 
 - **Context usage** — the status pill shows how full the agent's context window is (amber from 80%); the tooltip has the token count and how often it compacted. Codex reports its window; for Claude it comes from `context_window` in the agent's config (default 1,000,000).
+- **Prompt cache** — the tooltip also shows how much of the agent's prompts the provider served from its prompt cache: for the session, for the last turn, and how many turns were *cold* (a large prompt that mostly missed the cache, typically the first turn after the cache expired: 1 hour of idle for Claude Code on a subscription, ~30–45 minutes for Codex). Claude responses are counted once per message (the transcript repeats usage per content block); Codex totals are its own cumulative counts.
 - **Compaction** — after the CLI compacts its conversation, the agent's next read of the channel starts with the [channel summary](#channel-summaries) again. Its read cursor is kept, so no message is delivered twice.
 - **`/clear` or a new session** — the agent's read cursors are reset, so its next read is a fresh one (summary plus latest messages).
 - **Crash** — the wrapper records the CLI's exit code. A deliberate exit (code 0 e.g. `/exit`, 130 Ctrl-C, 143 SIGTERM) restarts a fresh session. Any other code — or none, if the CLI died with its tmux session — counts as a crash and restarts it with the session resumed (`claude --resume <id>`, `codex resume <id>`). If a resumed session crashes again within 2 minutes, the next start is fresh. A system notice tells the channel what happened, and the agent is prompted to check the channel and continue (unless that would repeat what crashed it). After 3 crashes in 15 minutes the prompt stops and restarts back off to 30 s. If Claude asks whether to resume from a summary (large session, cold cache), the wrapper picks the default, *Resume from summary*; prompts for the agent are held until that dialog is gone, and if it is still up after 30 s a notice asks you to answer it in the agent's terminal.
+
+### Waiting on long jobs
+An agent that starts something long — a training run, a big build, a download — should not sit in a polling loop: every poll is a turn that re-reads its whole context. Instead it starts the job in the background, registers a wait with `chat_wait` and ends its turn. The server checks every 5 s and wakes the agent with a prompt on the first of:
+
+- `pid` — that process exits (a zombie counts as exited; a reused pid does not count as the same process);
+- `path` — that file appears (a final checkpoint, a done-marker);
+- `path` + `contains` — a line written to that log file after registration contains one of the `|`-separated texts (e.g. `Traceback|FINISHED`). Plain text, not a regex, so no agent-supplied pattern can hang the server; `\r` progress output counts as lines, and a last line without a newline counts once the file stops growing;
+- `timeout_minutes` — the time is up (default 24 h, max 7 days; only a timeout = a timer).
+
+Paths must be absolute. When a wait ends, the channel gets a notice (`claude-lab's wait #3 "train run 7" is over: process 4242 exited.`) and the agent a prompt with the reason — a matched log line goes to the agent only. The pill shows ⏳ while an agent waits, and the tooltip lists its waits. Waits are stored in `data/waits.json`, so they survive a server restart; one that ends while its agent is offline only posts the notice. `chat_wait_cancel` cancels one wait or all of them.
+
+**Cache keepalive.** Claude Code caches its prompt for 1 hour on a subscription. An agent that waits longer wakes to an expired cache and re-caches its whole context at 2× the input price (a cache read costs 0.05× on Opus 5.5). So while a Claude agent has a wait, the server sends it a one-line keepalive prompt shortly before the cache would expire — about 1/40 of the cost of a cold wake-up. A ping goes out only when the agent's transcript shows a 1-hour cache, it has been idle 50–58 minutes, its context is at least 50k tokens, and it is online and not mid-turn. Codex is never pinged: its cache lifetime is neither reported nor configurable, and it has no write premium. Configure it in `config.toml`:
+
+```toml
+[cache_keepalive]
+scope = "waits"             # "off" | "waits"
+idle_minutes = 50           # ping after this long without a model request (5-55)
+min_context_tokens = 50000  # smaller contexts are cheap to re-cache
+max_hours = 24              # stop pinging for waits older than this
+```
 
 ### Multi-instance agents
 Run multiple instances of the same provider by mentioning that provider in multiple channels, or by launching extra wrappers manually. Each instance auto-registers with its own identity, color, status pill, and @mention routing.
@@ -296,7 +318,7 @@ The wrapper sends a heartbeat ping every 5 seconds to keep the agent marked as "
 When someone @mentions an offline agent, the message is still queued for delivery — the agent will pick it up when the wrapper next polls. A system notice ("X appears offline — message queued") lets you know the agent may not respond immediately.
 
 ### MCP tools
-Agents get 12 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_set_hat`, `chat_claim`, `chat_summary`, and `chat_propose_job`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Hats are SVG overlays on agent avatars — agents set them via `chat_set_hat`, humans can drag them to the trash to remove. Channel summaries are generated automatically — agents receive them on their first read of a channel and drill into them via `chat_summary` (read, zoom, recall). Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. Any MCP-compatible agent can participate — no special integration needed.
+Agents get 14 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_set_hat`, `chat_claim`, `chat_summary`, `chat_propose_job`, `chat_wait`, and `chat_wait_cancel`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Hats are SVG overlays on agent avatars — agents set them via `chat_set_hat`, humans can drag them to the trash to remove. Channel summaries are generated automatically — agents receive them on their first read of a channel and drill into them via `chat_summary` (read, zoom, recall). Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. `chat_wait` / `chat_wait_cancel` park an agent on a long job until it ends ([details](#waiting-on-long-jobs)). Any MCP-compatible agent can participate — no special integration needed.
 
 Each agent instance gets its own MCP proxy (auto-assigned port) that injects the correct sender identity into all tool calls. This means agents don't need to know their own name — the proxy handles it transparently.
 
@@ -455,11 +477,11 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests        # ~15 s, standard library only
+.venv/bin/python -m unittest discover -s tests        # ~25 s, standard library only
 AGENTCHATTR_TEST_LUNA=1 .venv/bin/python -m unittest tests.test_e2e_server   # real Codex Luna compressor
 ```
 
-Functional, integration, and end-to-end tests (macOS/Linux): the server log cap, chat log repair, the summary tree with its compressor workers, transcript tracking and the crash-restart policy, and the real server driven over HTTP and MCP on free ports with a temp config. The end-to-end tests use a private tmux socket, so they never touch running agent sessions. Summaries are written by a stand-in CLI unless `AGENTCHATTR_TEST_LUNA=1` is set.
+Functional, integration, and end-to-end tests (macOS/Linux): the server log cap, chat log repair, the summary tree with its compressor workers, transcript tracking (context, prompt cache) and the crash-restart policy, registered waits and the cache keepalive, and the real server driven over HTTP and MCP on free ports with a temp config. The end-to-end tests use a private tmux socket, so they never touch running agent sessions. Summaries are written by a stand-in CLI unless `AGENTCHATTR_TEST_LUNA=1` is set.
 
 ## Architecture
 
@@ -507,11 +529,15 @@ Functional, integration, and end-to-end tests (macOS/Linux): the server log cap,
 | `session_templates/` | Built-in session templates (JSON) — code review, debate, design critique, planning |
 | `router.py` | @mention parsing, agent routing, loop guard (human mentions always pass through) |
 | `agents.py` | Writes trigger queue files for wrapper to pick up |
-| `agent_session_monitor.py` | Wrapper thread: finds the CLI's transcript, reports context usage, compactions and `/clear` |
-| `agent_transcript_readers.py` | Incremental Claude Code / Codex transcript readers — context tokens, compaction events |
+| `agent_session_monitor.py` | Wrapper thread: finds the CLI's transcript, reports context usage, prompt-cache stats, compactions and `/clear` |
+| `agent_transcript_readers.py` | Incremental Claude Code / Codex transcript readers — context tokens, cache stats, compaction events |
+| `agent_cache_stats.py` | Per-session prompt-cache statistics — totals, last turn, cold turns, cache lifetime |
 | `agent_session_hook.py` | Claude Code `SessionStart` hook that tells the wrapper which transcript is its agent's |
 | `agent_crash_recovery.py` | Restart policy — resume vs fresh session after an exit, crash-loop guard, nudge prompt |
-| `agent_session_state.py` | Server side of session events — context usage, summary after compaction, cursor resets |
+| `agent_session_state.py` | Server side of session events — context usage, cache stats, summary after compaction, cursor resets |
+| `agent_waits.py` | Registered waits (`chat_wait`) — validation, JSON persistence, due waits for the server's wait runner |
+| `agent_wait_conditions.py` | Wait conditions — process exit, file appears, log line matches, timeout — and the wake/notice texts |
+| `agent_cache_keepalive.py` | Keeps a waiting Claude agent's 1-hour prompt cache warm — config and ping gates |
 | `mcp_bridge.py` | MCP tool definitions (`chat_send`, `chat_read`, `chat_claim`, etc.) |
 | `mcp_proxy.py` | Per-instance MCP proxy — injects sender identity into all tool calls |
 | `wrapper.py` | Cross-platform dispatcher — registration, auto-trigger, heartbeat, activity monitor |

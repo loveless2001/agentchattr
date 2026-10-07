@@ -81,6 +81,9 @@ Main `config.toml` sections:
 - `[downloads]`: ephemeral download link behavior for local paths mentioned by
   agents, including enablement, allowlisted roots, token lifetime, max file
   size, and max links per message.
+- `[cache_keepalive]`: prompt-cache keepalive for Claude agents with a
+  registered wait — `scope` (`off`/`waits`), `idle_minutes`,
+  `min_context_tokens`, `max_hours`.
 
 The example config binds the web server to `0.0.0.0`. `run.py` treats any
 non-localhost host as risky and requires `--allow-network` plus confirmation.
@@ -313,10 +316,15 @@ Session monitor and crash recovery (`agent_session_monitor.py`,
   `AGENTCHATTR_SESSION_EVENTS`). Codex's rollout is found among the open files
   of the tmux pane's process tree (`/proc/<pid>/fd`, Linux), skipping
   sub-agent rollouts.
-- The monitor tails that transcript and posts to
-  `/api/agent_session/{name}`: `context` (tokens, window) when it moves or
-  every 60 s, `compact` on a compaction, `clear` on a new session while the
-  CLI keeps running.
+- The monitor reads the whole transcript on attach (streamed), then tails it,
+  and posts to `/api/agent_session/{name}`: `context` (tokens, window, and
+  `cache` statistics from `agent_cache_stats.py`) when it moves or every 60 s,
+  `compact` on a compaction, `clear` on a new session while the CLI keeps
+  running. Cache stats: prompt / cached / written tokens for the session and
+  the last request, cold turns (prompt ≥ 30k, < 50% cached) and, for Claude,
+  the cache lifetime in use (`usage.cache_creation.ephemeral_1h/5m`). Claude
+  usage is counted once per `message.id`; Codex totals come from
+  `total_token_usage`.
 - tmux runs the CLI as `sh -c '<cli>; echo $? > {name}-exit-code'`. On exit
   the policy picks the next launch: code 0/130/143 → fresh; anything else
   (or no code) → resume the monitor's last session id, unless the launch was
@@ -383,6 +391,9 @@ Registered tools:
 - `chat_claim`: confirm or reclaim an identity in multi-instance setups.
 - `chat_summary`: read, zoom into, or regex-search (`recall`) the channel summary tree.
 - `chat_propose_job`: post a job proposal card for human approval.
+- `chat_wait` / `chat_wait_cancel`: park the agent on a long job until a
+  process exits, a file appears, a log line matches or a timeout passes (see
+  Waits and Cache Keepalive).
 
 Authentication and identity:
 
@@ -602,6 +613,40 @@ normal routing and agent triggering apply.
 
 Schedules can be paused, resumed, deleted, recurring, or one-shot.
 
+## Waits and Cache Keepalive
+
+`agent_waits.py` stores registered waits in `data/waits.json`;
+`agent_wait_conditions.py` checks them. A wait has an agent, a channel, a note
+and a deadline, plus any of: `pid` (+ its `/proc` start time), `path`, `path` +
+`contains` (plain-text alternatives, never a regex; + the log offset, inode
+and unterminated-tail size read so far). Waits survive server restarts and
+deregistration, and follow identity renames.
+
+The app's wait runner wakes every 5 seconds:
+
+1. `WaitStore.pop_due()` checks copies of the waits outside its lock (so MCP
+   calls and status never wait on log reads) and ends each wait whose first
+   condition holds: process gone or a zombie (or its pid now belongs to a newer
+   process), file exists, a newly appended log line contains a text (read
+   incrementally, truncation/replacement-safe, `\r` ends lines, ≤ 8 MB per
+   check, lines matched on their first 4 KB), deadline passed. A wait whose
+   check raises ends with that reason instead of failing every tick; a failed
+   save is logged and retried on the next one.
+2. For each ended wait it posts a system notice in the wait's channel (the
+   note is stripped of `@`; matched log lines are not echoed) and, if the agent
+   is online, queues one wake prompt per agent and channel through
+   `AgentTrigger.trigger_sync` (the wrapper keeps one prompt per channel and
+   batch, so waits ending together share a prompt).
+3. `CacheKeepalive.due()` (`agent_cache_keepalive.py`) picks waiting agents to
+   ping: scope `waits`, a wait younger than `max_hours`, a reported 1-hour
+   cache lifetime, idle since the last model request for
+   [`idle_minutes`, 58 min), context ≥ `min_context_tokens`, online and not
+   active, not yet pinged for that last request. Pings are queued as direct
+   injections (`inject_text`), so no role or rules suffix is added.
+
+Status payloads carry each channel target's waits for the pill's ⏳ badge and
+tooltip; registering, cancelling or ending a wait re-broadcasts status.
+
 ## Summaries
 
 Channel summaries are an OptChat-style tree (successor of OptMem) over each
@@ -754,6 +799,7 @@ Under `data_dir`, usually `./data`:
 - `summaries/<channel>.json`: channel summary trees (the old `summaries.json` is no longer used).
 - `jobs.json`: jobs and job messages.
 - `schedules.json`: scheduled prompts.
+- `waits.json`: registered agent waits (`chat_wait`).
 - `session_runs.json`: session run state.
 - `custom_templates.json`: saved custom session templates.
 - `mcp_cursors.json`: agent read cursors.
