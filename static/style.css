@@ -273,6 +273,10 @@ header h1 {
     color: var(--warning);
 }
 
+.status-wait {
+    font-size: 10px;
+}
+
 .status-pill.available .status-dot {
     background: var(--online);
 }

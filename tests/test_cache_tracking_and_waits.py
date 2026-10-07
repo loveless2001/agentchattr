@@ -1,12 +1,15 @@
 """Prompt-cache tracking: transcript parsing (Claude Code, Codex), the wrapper
-monitor's report and the server's status view.
+monitor's report and the server's status view. Registered waits (chat_wait):
+the store, each condition, validation and persistence.
 
 Transcript lines are shaped like the real Claude Code / Codex files.
 """
 
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -14,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import agent_session_state  # noqa: E402
+import agent_wait_conditions  # noqa: E402
+from agent_waits import MAX_WAITS_PER_AGENT, WaitStore  # noqa: E402
 from agent_session_monitor import AgentSessionMonitor, install_claude_session_hook  # noqa: E402
 from agent_transcript_readers import ClaudeTranscriptParser, CodexRolloutParser  # noqa: E402
 
@@ -146,6 +151,192 @@ class CacheReportTest(unittest.TestCase):
         self.apply(event="context", tokens=1_000, window=1_000_000,
                    cache={"prompt": "lots", "cached": -5, "ttl": "forever", "last": "x"})
         self.assertNotIn("cache", agent_session_state.get_context("agent"))
+
+
+class WaitStoreTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.changes = []
+        self.store = WaitStore(self.tmp / "waits.json", on_change=lambda: self.changes.append(1))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def wait(self, **kw):
+        return self.store.create("claude-lab", "lab", note=kw.pop("note", "train run 7"), **kw)
+
+    def sleeper(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        return proc
+
+    def test_pid_wait_ends_when_the_process_exits(self):
+        proc = self.sleeper()
+        self.wait(pid=proc.pid)
+        self.assertEqual(self.store.pop_due(), [])
+        proc.kill()
+        proc.wait()
+        [(wait, reason)] = self.store.pop_due()
+        self.assertEqual(reason, f"process {proc.pid} exited")
+        self.assertEqual(self.store.list_for("claude-lab"), [])
+
+    def test_an_unreaped_zombie_counts_as_exited(self):
+        proc = self.sleeper()
+        self.wait(pid=proc.pid)
+        proc.kill()
+        time.sleep(0.3)  # killed but not waited for: a zombie
+        self.assertEqual(len(self.store.pop_due()), 1)
+
+    def test_a_reused_pid_is_not_the_same_process(self):
+        proc = self.sleeper()
+        self.wait(pid=proc.pid)
+        self.store._waits[0]["pid_start"] = "1"  # as if another process now had the pid
+        self.assertEqual(len(self.store.pop_due()), 1)
+
+    def test_file_wait_ends_when_the_file_appears(self):
+        marker = self.tmp / "done.flag"
+        self.wait(path=str(marker))
+        self.assertEqual(self.store.pop_due(), [])
+        marker.touch()
+        [(_, reason)] = self.store.pop_due()
+        self.assertEqual(reason, f"{marker} appeared")
+
+    def test_log_text_matches_only_lines_written_after_registration(self):
+        log = self.tmp / "train.log"
+        log.write_text("FINISHED an older run\n", "utf-8")
+        self.wait(path=str(log), contains="FINISHED|Traceback")
+        self.assertEqual(self.store.pop_due(), [])
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("epoch 1 loss 0.4\nFINI")  # the match is still being written
+        self.assertEqual(self.store.pop_due(), [])
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("SHED run 7\n")
+        [(_, reason)] = self.store.pop_due()
+        self.assertEqual(reason, f'{log} logged: "FINISHED run 7"')
+
+    def test_regex_characters_are_plain_text(self):
+        log = self.tmp / "train.log"
+        self.wait(path=str(log), contains="(a+)+$")
+        log.write_text("a" * 4000 + "!\n", "utf-8")  # would hang a backtracking regex
+        self.assertEqual(self.store.pop_due(), [])
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("matched (a+)+$ literally\n")
+        self.assertEqual(len(self.store.pop_due()), 1)
+
+    def test_progress_bars_and_an_unterminated_last_line(self):
+        log = self.tmp / "train.log"
+        self.wait(path=str(log), contains="FINISHED")
+        log.write_text("epoch 1\r 50%\r FINISHED", "utf-8")  # \r-only progress output
+        self.assertEqual(self.store.pop_due(), [])            # the last line may still grow
+        [(_, reason)] = self.store.pop_due()                   # the file stopped growing
+        self.assertEqual(reason, f'{log} logged: "FINISHED"')
+
+    def test_a_truncated_or_replaced_log_is_read_again_from_the_start(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                log = self.tmp / f"train-{replace}.log"
+                log.write_text("x" * 100 + "\n", "utf-8")
+                self.wait(path=str(log), contains="Traceback")
+                text = "Traceback (most recent call last)\n" + ("y" * 200 + "\n" if replace else "")
+                if replace:  # a new file, longer than the old offset
+                    (self.tmp / "new.log").write_text(text, "utf-8")
+                    (self.tmp / "new.log").replace(log)
+                else:
+                    log.write_text(text, "utf-8")
+                self.assertEqual(len(self.store.pop_due()), 1)
+
+    def test_timeout_and_a_plain_timer(self):
+        wait = self.wait(timeout_minutes=90)
+        self.assertEqual(self.store.pop_due(now=wait["created_at"] + 89 * 60), [])
+        [(_, reason)] = self.store.pop_due(now=wait["created_at"] + 90 * 60)
+        self.assertEqual(reason, "timed out after 1h30m")
+
+    def test_a_pid_or_path_wait_gets_the_default_timeout(self):
+        wait = self.wait(path=str(self.tmp / "ckpt.pt"))
+        self.assertEqual(wait["deadline"] - wait["created_at"], 24 * 3600)
+
+    def test_invalid_waits_are_refused_with_a_reason(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        existing = self.tmp / "exists"
+        existing.touch()
+        cases = [
+            (dict(), "give a pid, a path or timeout_minutes"),
+            (dict(note="  ", timeout_minutes=5), "note is required"),
+            (dict(pid=dead.pid), "is not running"),
+            (dict(pid=1), "is not running"),
+            (dict(path="relative/train.log"), "must be absolute"),
+            (dict(path=str(self.tmp / "a\nb")), "control characters"),
+            (dict(contains="done", timeout_minutes=5), "contains needs path"),
+            (dict(path=str(self.tmp / "t.log"), contains="||"), "contains is 1 to"),
+            (dict(path=str(self.tmp), contains="x"), "is not a file"),
+            (dict(path=str(existing)), "already exists"),
+            (dict(timeout_minutes=-5), "timeout_minutes is 1 to"),
+            (dict(timeout_minutes=7 * 24 * 60 + 1), "timeout_minutes is 1 to"),
+        ]
+        for kwargs, message in cases:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError) as caught:
+                self.wait(**kwargs)
+            self.assertIn(message, str(caught.exception))
+        self.assertEqual(self.store.list_for("claude-lab"), [])
+
+    def test_notes_cannot_mention_anyone_and_waits_per_agent_are_capped(self):
+        wait = self.wait(note="@codex ping\nme", timeout_minutes=5)
+        self.assertEqual(wait["note"], "codex ping me")
+        for _ in range(MAX_WAITS_PER_AGENT - 1):
+            self.wait(timeout_minutes=5)
+        with self.assertRaises(ValueError):
+            self.wait(timeout_minutes=5)
+
+    def test_waits_persist_and_can_be_cancelled_or_follow_a_rename(self):
+        first = self.wait(timeout_minutes=60)
+        self.wait(path=str(self.tmp / "ckpt.pt"))
+        reloaded = WaitStore(self.tmp / "waits.json")
+        self.assertEqual([w["id"] for w in reloaded.list_for("claude-lab")], [1, 2])
+        self.assertEqual(reloaded.create("codex", "general", note="x", timeout_minutes=1)["id"], 3)
+
+        reloaded.rename("claude-lab", "claude-lab-2")
+        self.assertEqual(reloaded.cancel("claude-lab", 0), 0)
+        self.assertEqual(reloaded.cancel("claude-lab-2", first["id"]), 1)
+        self.assertEqual(reloaded.cancel("claude-lab-2", 0), 1)
+        self.assertEqual([w["agent"] for w in WaitStore(self.tmp / "waits.json").list_for("codex")],
+                         ["codex"])
+
+    def test_a_wait_that_cannot_be_checked_ends_with_the_reason(self):
+        self.wait(timeout_minutes=5)
+        self.store._waits[0]["deadline"] = "soon"  # e.g. a hand-edited waits.json
+        with self.assertLogs("agent_waits", "ERROR"):
+            [(_, reason)] = self.store.pop_due()
+        self.assertIn("could not be checked (TypeError)", reason)
+
+    def test_a_failed_save_keeps_the_waits_in_memory(self):
+        self.store._path = self.tmp / "missing-dir" / "waits.json"
+        with self.assertLogs("agent_waits", "ERROR"):
+            wait = self.wait(timeout_minutes=1)
+            self.assertEqual(len(self.store.pop_due(now=wait["created_at"] + 61)), 1)
+
+    def test_changes_are_announced(self):
+        wait = self.wait(timeout_minutes=1)
+        self.store.pop_due(now=wait["created_at"] + 61)
+        self.wait(timeout_minutes=1)
+        self.store.cancel("claude-lab")
+        self.wait(timeout_minutes=1)
+        self.store.rename("claude-lab", "claude-lab-2")
+        self.assertEqual(len(self.changes), 6)
+
+    def test_texts(self):
+        wait = self.wait(path=str(self.tmp / "train.log"), contains="FINISHED")
+        reason = f'{wait["path"]} logged: "FINISHED secret-ish line"'
+        notice = agent_wait_conditions.ended_notice(wait, reason, online=False)
+        self.assertNotIn("secret-ish", notice)  # log lines go to the agent, not the channel
+        self.assertIn("is offline", notice)
+        timer = self.wait(note="check in", timeout_minutes=30)
+        prompt = agent_wait_conditions.wake_prompt([(wait, reason), (timer, "timed out after 30m")])
+        self.assertIn("FINISHED secret-ish line", prompt)
+        self.assertIn("wait #2 (check in) is over: timed out after 30m", prompt)  # both, one prompt
+        self.assertIn("#lab", prompt)
+        self.assertIn("logs a line containing 'FINISHED'", agent_wait_conditions.describe(wait))
 
 
 if __name__ == "__main__":

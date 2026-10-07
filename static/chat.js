@@ -1737,6 +1737,25 @@ function _syncPillContext(pill, ctx) {
     }
 }
 
+// Registered waits (chat_wait): an hourglass on the pill, one tooltip line each.
+function _syncPillWaits(pill, waits) {
+    let badge = pill.querySelector('.status-wait');
+    if (!waits || !waits.length) {
+        if (badge) badge.remove();
+        return;
+    }
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'status-wait';
+        pill.appendChild(badge);
+    }
+    badge.textContent = waits.length > 1 ? `\u23f3${waits.length}` : '\u23f3';
+    for (const w of waits) {
+        const since = new Date(w.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        pill.title += `\nwaiting: ${w.note} (since ${since})`;
+    }
+}
+
 function updateStatus(data) {
     _latestStatusData = data || {};
     const channelStatus = _latestStatusData._channels?.[activeChannel] || {};
@@ -1764,6 +1783,7 @@ function updateStatus(data) {
         if (info.target) pill.title = `@${name} (${info.target} in #${activeChannel})`;
         else pill.title = `@${name} (#${activeChannel})`;
         _syncPillContext(pill, info.context);
+        _syncPillWaits(pill, info.waits);
 
         // Track role (displayed on bubbles, not on pill)
         if (info.role !== undefined) {

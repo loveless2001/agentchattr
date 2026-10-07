@@ -17,6 +17,7 @@ from pathlib import Path
 from mcp.server.fastmcp import Context, FastMCP
 
 import agent_session_state
+from agent_wait_conditions import describe as describe_wait
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ registry = None       # set by run.py — RuntimeRegistry instance
 config = None         # set by run.py — full config.toml dict
 router = None         # set by run.py — Router instance
 agents = None         # set by run.py — AgentManager instance
+waits = None          # set by run.py — agent_waits.WaitStore instance
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
@@ -92,6 +94,9 @@ _MCP_INSTRUCTIONS = (
     "If the latest message in a channel is addressed to you (or all agents), treat it as your active task "
     "and execute it directly. Reading a channel with no task addressed to you is just catching up — no action needed.\n\n"
     "If chat_send rejects your sender with an identity error, call chat_claim(sender='your_base_name') to get your identity.\n\n"
+    "Long-running work (training runs, big builds, downloads): start it in the background, register "
+    "chat_wait(pid=..., path=..., contains=...) and end your turn. You are woken with a prompt when it is over. "
+    "Never wait by polling (sleep loops, repeated status checks or chat_read) — every poll re-reads your whole context.\n\n"
     "Channel summaries are written automatically in the background — never write or post summaries yourself. "
     "Your first chat_read of a channel in a fresh session (and every chat_resync) starts with a summary of the "
     "channel's history: older history compressed, recent history in more detail, each line tagged with a block id "
@@ -480,6 +485,8 @@ def migrate_identity(old_name: str, new_name: str):
         _save_roles()
     _save_cursors()
     agent_session_state.rename(old_name, new_name)
+    if waits:
+        waits.rename(old_name, new_name)
 
 
 def purge_identity(name: str):
@@ -914,9 +921,64 @@ def chat_summary(
             "Summaries are written automatically; there is no write action.")
 
 
+def _active_waits_text(agent: str) -> str:
+    active = waits.list_for(agent)
+    if not active:
+        return "You have no active waits."
+    return "Your active waits:\n" + "\n".join(
+        f"- #{w['id']} {w['note']} (#{w['channel']}): {describe_wait(w)}" for w in active)
+
+
+def chat_wait(sender: str, note: str, pid: int = 0, path: str = "", contains: str = "",
+              timeout_minutes: int = 0, channel: str = "", ctx: Context | None = None) -> str:
+    """Wait for a long-running job (training run, big build, download) without spending tokens.
+
+    Start the job in the background first, e.g.
+    `nohup python train.py > /abs/path/train.log 2>&1 & echo $!`, then register a wait and
+    END YOUR TURN. You are woken with a prompt when the first of these happens:
+    - pid: that process exits
+    - path (no pattern): that file appears (a final checkpoint, a done-marker)
+    - path + contains: a line written to that log file from now on contains one of the
+      |-separated texts (plain text, not a regex), e.g. contains="Traceback|Error|FINISHED"
+    - timeout_minutes: the time is up (default 1440 = 24h, max 10080). Only a timeout = a timer.
+    Paths must be absolute. note says what you wait for (shown to humans, max 120 chars).
+    channel: where to report (default: your channel). Do not poll while you wait.
+    Returns your active waits."""
+    sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
+    if err:
+        return err
+    if not waits:
+        return "Error: waits are not available."
+    import app
+    channel = channel.strip().lstrip("#") or app._channel_for_agent_instance(sender)
+    known = room_settings.get("channels", ["general"]) if room_settings else ["general"]
+    if channel not in known:
+        return f"Error: unknown channel #{channel}."
+    try:
+        wait = waits.create(sender, channel, note=note, pid=pid, path=path, contains=contains,
+                            timeout_minutes=timeout_minutes)
+    except ValueError as exc:
+        return f"Error: {exc}."
+    return (f"Wait #{wait['id']} registered: {describe_wait(wait)}. End your turn now; "
+            f"you will be woken when it is over.\n{_active_waits_text(sender)}")
+
+
+def chat_wait_cancel(sender: str, wait_id: int = 0, ctx: Context | None = None) -> str:
+    """Cancel one of your waits (wait_id from chat_wait), or all of them with wait_id=0.
+    Returns your remaining waits."""
+    sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
+    if err:
+        return err
+    if not waits:
+        return "Error: waits are not available."
+    cancelled = waits.cancel(sender, wait_id)
+    return f"Cancelled {cancelled} wait(s).\n{_active_waits_text(sender)}"
+
+
 _ALL_TOOLS = [
     chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
     chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job,
+    chat_wait, chat_wait_cancel,
 ]
 
 

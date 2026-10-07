@@ -33,6 +33,8 @@ from session_engine import SessionEngine
 from server_launcher import ServerLauncher
 from attachment_processor import process_upload
 import agent_session_state
+import agent_wait_conditions
+from agent_waits import WaitStore
 from channel_bindings import ChannelBindings
 from download_links import DownloadLinkService
 
@@ -47,6 +49,7 @@ rules: RuleStore | None = None
 summaries: SummaryStore | None = None
 jobs: JobStore | None = None
 schedules: ScheduleStore | None = None
+waits: WaitStore | None = None
 router: Router | None = None
 agents: AgentTrigger | None = None
 registry: RuntimeRegistry | None = None
@@ -261,6 +264,8 @@ def _channel_base_status(channel: str) -> dict:
             "role": mcp_bridge.get_role(target or base),
             "target": target or "",
             "context": agent_session_state.get_context(target) if target else {},
+            "waits": [{k: w[k] for k in ("id", "note", "created_at", "deadline")}
+                      for w in waits.list_for(target)] if target and waits else [],
         }
     return result
 
@@ -442,7 +447,7 @@ def _post_chat_log_damage_notice(log_path: Path):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, router, agents, registry
+    global store, rules, summaries, jobs, schedules, waits, router, agents, registry
     global session_store, session_engine, launcher, channel_bindings, download_links, config
     config = cfg
     # --- Security: store the session token and install middleware ---
@@ -492,6 +497,7 @@ def configure(cfg: dict, session_token: str = ""):
 
     schedules = ScheduleStore(str(Path(data_dir) / "schedules.json"))
     schedules.on_change(_on_schedule_change)
+    waits = WaitStore(Path(data_dir) / "waits.json", on_change=_on_waits_change)
 
     max_hops = cfg.get("routing", {}).get("max_agent_hops", 4)
 
@@ -712,6 +718,41 @@ def configure(cfg: dict, session_token: str = ""):
 
     threading.Thread(target=_schedule_runner, daemon=True).start()
 
+    # --- Wait runner: ends registered waits (chat_wait) and wakes their agents ---
+    def _wait_runner():
+        import time as _time
+        while True:
+            _time.sleep(WAIT_CHECK_SECONDS)
+            try:
+                if waits:
+                    _run_waits()
+            except Exception:
+                log.exception("wait runner error")
+
+    threading.Thread(target=_wait_runner, daemon=True).start()
+
+
+WAIT_CHECK_SECONDS = 5
+
+
+def _run_waits():
+    """End the waits that are over: a notice in the channel, a wake prompt to the agent."""
+    import mcp_bridge
+    online = lambda name: agents.is_available(name) and mcp_bridge.is_online(name)
+    wakes: dict[tuple[str, str], list] = {}  # one prompt per agent and channel
+    for wait, reason in waits.pop_due():
+        try:
+            awake = online(wait["agent"])
+            store.add("system", agent_wait_conditions.ended_notice(wait, reason, awake),
+                      channel=wait["channel"])
+            if awake:
+                wakes.setdefault((wait["agent"], wait["channel"]), []).append((wait, reason))
+        except Exception:
+            log.exception("could not end wait #%s", wait.get("id"))
+    for (name, channel), ended in wakes.items():
+        agents.trigger_sync(name, channel=channel,
+                            prompt=agent_wait_conditions.wake_prompt(ended))
+
 
 # --- Store → WebSocket bridge ---
 
@@ -765,6 +806,19 @@ def _on_job_change(action: str, data: dict):
     except RuntimeError:
         pass
     asyncio.run_coroutine_threadsafe(broadcast_job(action, data), _event_loop)
+
+
+def _on_waits_change():
+    """Called from any thread when a wait is registered, cancelled or ends."""
+    if _event_loop is None:
+        return
+    try:
+        if asyncio.get_running_loop() is _event_loop:
+            asyncio.ensure_future(broadcast_status())
+            return
+    except RuntimeError:
+        pass
+    asyncio.run_coroutine_threadsafe(broadcast_status(), _event_loop)
 
 
 def _on_schedule_change(action: str, schedule: dict):
