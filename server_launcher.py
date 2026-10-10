@@ -111,9 +111,12 @@ class ServerLauncher:
         return self._logs_dir / f"{agent_name}.log"
 
     def _wrapper_pids(self, session_name: str) -> list[str]:
+        # "--" stops pgrep parsing the pattern (it starts with "--") as an
+        # option, which made it exit 2 and match nothing. The trailing anchor
+        # keeps #ai from also matching the #ai-os wrapper.
         try:
             result = subprocess.run(
-                ["pgrep", "-f", f"--session-name {session_name}"],
+                ["pgrep", "-f", "--", f"--session-name {session_name}( |$)"],
                 capture_output=True, text=True,
             )
         except Exception:
