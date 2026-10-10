@@ -796,6 +796,8 @@ function connectWebSocket() {
             updateRulesBadge();
         } else if (event.type === 'rule' || event.type === 'decision') {
             handleRuleEvent(event.action, event.data);
+        } else if (event.type === 'rule_error') {
+            showRulesError(event.message);
         } else if (event.type === 'schedules') {
             schedulesList = event.data || [];
             renderSchedulesBar();

@@ -76,7 +76,8 @@ _MCP_INSTRUCTIONS = (
     "recovering from an error). After an empty read ('No new messages'), do NOT read the same channel again — "
     "stop and wait for your next prompt. Never use chat_read as a sleep/wait loop.\n\n"
     "Rules are the shared working style for your agents. They are short imperative instructions that all agents should follow. "
-    "At session start, call chat_rules(action='list') to read active rules — treat them as authoritative guidance. "
+    "Active rules come at the top of your first read of a channel, and again after a restart, /clear or compaction — "
+    "treat them as authoritative guidance; chat_rules(action='list') shows them at any time. "
     "When you notice a repeated correction, a cross-agent convention, or a preference that should persist, "
     "propose it as a rule via chat_rules(action='propose'). Keep rules short and imperative (max 160 chars). "
     "Don't propose trivial or session-specific things. chat_decision is an alias for chat_rules (backward compat).\n\n"
@@ -637,11 +638,11 @@ def chat_read(
     elif sender:
         _empty_read_count[sender] = 0
 
-    # Summary on a fresh read, and once after a compaction (the cursor is kept,
-    # so nothing already delivered comes back; the summary re-grounds the agent).
+    # Rules + summary on a fresh read, and once after a compaction (the cursor is
+    # kept, so nothing already delivered comes back; the header re-grounds the agent).
     pending = bool(ch and sender and agent_session_state.take_summary_pending(sender))
     if ch and (fresh or pending):
-        serialized = _with_summary_header(ch, serialized)
+        serialized = _with_channel_header(ch, serialized)
 
     # Prepend identity breadcrumb if multi-instance
     if sender and registry and registry.is_registered(sender):
@@ -664,7 +665,8 @@ def chat_resync(
 
     Returns the latest `limit` messages and resets the sender cursor
     to the latest returned message id. With a channel, the messages are
-    preceded by the channel summary (use after /clear or compaction).
+    preceded by the active rules and the channel summary (use after /clear or
+    compaction).
     Pass channel to filter by channel name (default: all channels).
     """
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
@@ -677,19 +679,29 @@ def chat_resync(
     if not ch:
         return serialized
     agent_session_state.clear_summary_pending(sender)
-    return _with_summary_header(ch, serialized)
+    return _with_channel_header(ch, serialized)
 
 
-def _with_summary_header(channel: str, body: str) -> str:
-    """Prefix a channel read with the channel's summary tree, if it has one."""
-    if not summaries:
-        return body
-    try:
-        header = summaries.render(channel)
-    except Exception:
-        log.exception("Failed to render summary for #%s", channel)
-        return body
-    return f"{header}\n{body}" if header else body
+def _rules_header() -> str:
+    """Active rules, sent with every channel header so a context that lost them
+    (new instance, CLI restart or /clear, compaction) gets them back."""
+    active = rules.active_list()["rules"] if rules else []
+    if not active:
+        return ""
+    lines = "\n".join(f"{i}. {r}" for i, r in enumerate(active, 1))
+    return f"ACTIVE RULES (approved by the human; follow them):\n{lines}"
+
+
+def _with_channel_header(channel: str, body: str) -> str:
+    """Prefix a channel read with the active rules and the channel's summary tree."""
+    header = ""
+    if summaries:
+        try:
+            header = summaries.render(channel)
+        except Exception:
+            log.exception("Failed to render summary for #%s", channel)
+    parts = [p for p in (_rules_header(), header, body) if p]
+    return "\n".join(parts)
 
 
 def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -> str:

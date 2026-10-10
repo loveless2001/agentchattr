@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 MAX_ACTIVE_RULES = 10
+MAX_TOTAL_RULES = 50  # all states, archived included
 MAX_TEXT_CHARS = 160
 MAX_REASON_CHARS = 240
 SOFT_WARNING_THRESHOLD = 7
@@ -115,8 +116,7 @@ class RuleStore:
 
     def propose(self, text: str, author: str, reason: str = "") -> dict | None:
         with self._lock:
-            total = len(self._rules)
-            if total >= 50:  # generous total cap including all states
+            if len(self._rules) >= MAX_TOTAL_RULES:
                 return None
             r = {
                 "id": self._next_id,
@@ -133,12 +133,16 @@ class RuleStore:
         return r
 
     def activate(self, rule_id: int) -> dict | None:
+        """Activate a rule. None when it does not exist or MAX_ACTIVE_RULES are
+        already active; an already-active rule is returned unchanged."""
         with self._lock:
             active_count = sum(1 for r in self._rules if r.get("status") == "active")
-            if active_count >= MAX_ACTIVE_RULES:
-                return None
             for r in self._rules:
                 if r["id"] == rule_id:
+                    if r.get("status") == "active":
+                        return dict(r)
+                    if active_count >= MAX_ACTIVE_RULES:
+                        return None
                     r["status"] = "active"
                     self._bump_epoch()
                     self._save()

@@ -88,6 +88,15 @@ function setupRuleForm() {
 let _rulesArchivedExpanded = false;
 let _draggedRuleId = null;
 let _seenRuleIds = new Set();
+let _rulesError = '';        // why the last rule change was refused (shown atop the panel)
+let _rulesErrorTimer = null;
+
+// Buttons on each card, by status: [label, target status or 'delete']
+const RULE_CARD_ACTIONS = {
+    draft: [['Activate', 'active'], ['Archive', 'archived']],
+    active: [['Deactivate', 'draft'], ['Archive', 'archived']],
+    archived: [['Activate', 'active'], ['Delete', 'delete']],
+};
 
 // ---------------------------------------------------------------------------
 // Core
@@ -122,6 +131,26 @@ function toggleRulesPanel() {
             renderRulesPanel();
         }
     });
+}
+
+// Show why a rule change was refused (e.g. the active cap), opening the panel.
+function showRulesError(message) {
+    _rulesError = message || '';
+    clearTimeout(_rulesErrorTimer);
+    _rulesErrorTimer = setTimeout(() => { _rulesError = ''; renderRulesPanel(); }, 8000);
+    const panel = document.getElementById('rules-panel');
+    if (panel && panel.classList.contains('hidden')) toggleRulesPanel();
+    else renderRulesPanel();
+}
+
+function setRuleStatus(id, target) {
+    const type = { active: 'rule_activate', draft: 'rule_make_draft', archived: 'rule_deactivate' }[target];
+    if (type) window.ws.send(JSON.stringify({ type, id }));
+}
+
+function ruleCardAction(id, target) {
+    if (target !== 'delete') { setRuleStatus(id, target); return; }
+    if (confirm('Delete this rule?')) window.ws.send(JSON.stringify({ type: 'rule_delete', id }));
 }
 
 function remindAgents() {
@@ -164,6 +193,13 @@ function renderRulesPanel() {
         savedForm = activeForm.parentNode.removeChild(activeForm);
     }
     list.innerHTML = '';
+
+    if (_rulesError) {
+        const error = document.createElement('div');
+        error.className = 'rules-error';
+        error.textContent = _rulesError;
+        list.appendChild(error);
+    }
 
     const normalize = (s) => s === 'proposed' ? 'draft' : (s === 'approved' ? 'active' : (s || 'draft'));
     // Filter out pending rules — they only exist as proposal cards in the timeline
@@ -257,13 +293,7 @@ function renderRulesPanel() {
             if (!d) return;
             const currentStatus = normalize(d.status);
             if (currentStatus === group.key) return;
-            if (group.key === 'active') {
-                window.ws.send(JSON.stringify({ type: 'rule_activate', id }));
-            } else if (group.key === 'draft') {
-                window.ws.send(JSON.stringify({ type: 'rule_make_draft', id }));
-            } else {
-                window.ws.send(JSON.stringify({ type: 'rule_deactivate', id }));
-            }
+            setRuleStatus(id, group.key);
         });
 
         list.appendChild(header);
@@ -291,11 +321,15 @@ function renderRulesPanel() {
             });
 
             const displayStatus = normalize(d.status);
+            const actions = (RULE_CARD_ACTIONS[displayStatus] || []).map(([label, target]) =>
+                `<button class="${target === 'delete' ? 'rule-delete-btn' : ''}" onclick="event.stopPropagation(); ruleCardAction(${d.id}, '${target}')">${label}</button>`
+            ).join('');
 
             card.innerHTML = `
                 <div class="rule-card-header">
                     <span class="rule-status-dot ${displayStatus}"></span>
                     <div class="rule-text">${window.escapeHtml(d.text || d.decision || '')}</div>
+                    <div class="rule-actions">${actions}</div>
                 </div>
             `;
             itemsInner.appendChild(card);
@@ -413,18 +447,6 @@ function submitCreateRule(btn) {
     form.remove();
 }
 
-function toggleRuleStatus(id) {
-    const rules = window.rules;
-    const d = rules.find(r => r.id === id);
-    if (!d) return;
-
-    if (d.status === 'active' || d.status === 'approved') {
-        window.ws.send(JSON.stringify({ type: 'rule_deactivate', id }));
-    } else {
-        window.ws.send(JSON.stringify({ type: 'rule_activate', id }));
-    }
-}
-
 function editRule(id) {
     const rules = window.rules;
     const d = rules.find(r => r.id === id);
@@ -493,20 +515,6 @@ function cancelRuleEdit(id) {
     if (editArea) editArea.remove();
 }
 
-function startDeleteRule(id) {
-    const card = document.querySelector(`.rule-card[data-id="${id}"]`);
-    if (!card) return;
-    const actions = card.querySelector('.rule-actions');
-    if (!actions || actions.dataset.confirming) return;
-    actions.dataset.confirming = '1';
-    actions.style.opacity = '1';
-    actions.innerHTML = `
-        <span style="font-size:11px;color:var(--error-color);white-space:nowrap;margin-right:4px">Delete?</span>
-        <button class="confirm-yes" style="background:var(--error-color);color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit" onclick="deleteRule(${id})">Yes</button>
-        <button class="confirm-no" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit" onclick="cancelDeleteRule(${id})">No</button>
-    `;
-}
-
 function deleteRule(id) {
     const rules = window.rules;
     const d = rules.find(r => r.id === id);
@@ -524,21 +532,21 @@ function deleteRule(id) {
     }
 }
 
-function cancelDeleteRule(id) {
-    renderRulesPanel();
-}
-
 // ---------------------------------------------------------------------------
 // Proposal resolve / dismiss
 // ---------------------------------------------------------------------------
 
 async function resolveRuleProposal(msgId, action) {
     try {
-        await fetch(`/api/messages/${msgId}/resolve_rule_proposal`, {
+        const res = await fetch(`/api/messages/${msgId}/resolve_rule_proposal`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Session-Token': window.SESSION_TOKEN },
             body: JSON.stringify({ action }),
         });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            showRulesError(body.error || 'Could not update the rule.');
+        }
     } catch (e) {
         console.error('Failed to resolve rule proposal:', e);
     }
@@ -576,13 +584,12 @@ window.toggleRulesPanel = toggleRulesPanel;
 window.remindAgents = remindAgents;
 window.showCreateRule = showCreateRule;
 window.submitCreateRule = submitCreateRule;
-window.toggleRuleStatus = toggleRuleStatus;
+window.showRulesError = showRulesError;
+window.ruleCardAction = ruleCardAction;
 window.editRule = editRule;
 window.saveRuleEdit = saveRuleEdit;
 window.cancelRuleEdit = cancelRuleEdit;
-window.startDeleteRule = startDeleteRule;
 window.deleteRule = deleteRule;
-window.cancelDeleteRule = cancelDeleteRule;
 window.resolveRuleProposal = resolveRuleProposal;
 window.dismissRuleProposal = dismissRuleProposal;
 window.RulesPanel = { init: _rulesPanelInit };

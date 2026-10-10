@@ -174,7 +174,7 @@ Then it accepts browser events:
 Server-to-browser events are JSON objects with a `type` field. Key event types
 include `message`, `status`, `typing`, `settings`, `agents`, `base_colors`,
 `todos`, `todo_update`, `rules`, `rule`, `jobs`, `job`, `schedules`,
-`schedule`, `session`, `delete`, `edit`, `clear`, `agent_renamed`,
+`schedule`, `session`, `rule_error`, `delete`, `edit`, `clear`, `agent_renamed`,
 `channel_renamed`, `history_state`, and `pending_instance`.
 
 Before chat messages are sent to browsers, `app._decorate_message_for_client()`
@@ -540,8 +540,16 @@ as To Do, Active, and Closed respectively.
 `rules.py` implements shared working-style rules.
 
 Rules are persisted in `data/rules.json` with an epoch number. Active-rule
-changes bump the epoch. Wrappers fetch active rules and inject them into wake
-prompts when needed.
+changes bump the epoch. Agents get the active rules two ways:
+
+- Wake prompts: wrappers fetch active rules and append them (see Agent
+  Wrappers) on the wrapper's first trigger, after an epoch change, and every
+  `rules_refresh_interval` triggers.
+- Channel header: `mcp_bridge._with_channel_header()` puts an `ACTIVE RULES`
+  block above the summary header, so a fresh read of a channel, the read
+  after a compaction, and `chat_resync(channel)` carry them. This covers a
+  context that lost them while the wrapper kept running (CLI restart, a
+  CLI-native `/clear`, compaction).
 
 Rule states:
 
@@ -560,6 +568,19 @@ Limits:
 
 Agents can list and propose rules through MCP. Activation, editing, archiving,
 and deletion are reserved for humans via the UI/API.
+
+Human actions:
+
+- A rule the human adds in the panel (`rule_propose` from the room username)
+  is activated at once; over the active cap it is saved as a draft.
+- Rule cards carry hover buttons by status: draft → Activate/Archive, active
+  → Deactivate (back to draft)/Archive, archived → Activate/Delete. Dragging
+  a card onto a group header, or an archived card onto the trash, still works.
+- `RuleStore.activate()` returns the rule unchanged when it is already active
+  and `None` when the cap refuses it. A refused panel action gets a
+  `rule_error` WebSocket event back (shown atop the panel for 8 s, opening it
+  if closed); a refused proposal-card Activate gets HTTP 409 and the card
+  stays pending.
 
 ## Sessions
 
@@ -700,9 +721,9 @@ channel's chat history.
   one message whole with its neighbours) and `recall` (regex over the
   channel's raw history; queries over 200 chars or with nested quantifiers like `(a+)+` are
   rejected, since Python's `re` cannot time out).
-- `chat_read` prepends the header on an agent's first read of a channel (no
-  cursor yet), and once after a wrapper-reported compaction (cursor kept);
-  `chat_resync` always does.
+- `chat_read` prepends the header (active rules, then the summary) on an
+  agent's first read of a channel (no cursor yet), and once after a
+  wrapper-reported compaction (cursor kept); `chat_resync` always does.
 - On load, a tree whose leaves no longer match the chat log (a message lost
   to a torn line, or restored by hand) is rebuilt; nodes covering the same
   messages keep their lines.

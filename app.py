@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from store import MessageStore
-from rules import RuleStore
+from rules import RuleStore, MAX_ACTIVE_RULES, MAX_TOTAL_RULES
 from summaries import SummaryStore
 from summary_compressor_worker import SummaryCompressor
 from jobs import JobStore
@@ -732,6 +732,19 @@ def _on_store_message(msg: dict):
     except RuntimeError:
         pass  # No running loop — we're in a different thread (MCP)
     asyncio.run_coroutine_threadsafe(_handle_new_message(msg), _event_loop)
+
+
+def _activate_rule(rule_id: int) -> str | None:
+    """Activate a rule; returns why when the active-rule cap refuses it."""
+    if rules.activate(rule_id) is None and rules.get(rule_id):
+        return (f"{MAX_ACTIVE_RULES} rules are already active. "
+                "Deactivate or archive one first.")
+    return None
+
+
+async def _send_rule_error(websocket: WebSocket, message: str):
+    """Tell the browser that asked why its rule change did not happen."""
+    await websocket.send_text(json.dumps({"type": "rule_error", "message": message}))
 
 
 def _on_rule_change(action: str, rule: dict):
@@ -1749,10 +1762,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 is_human = author.lower() == room_settings.get("username", "user").lower()
                 if text:
                     rule = rules.propose(text, author, reason)
-                    if rule:
+                    if not rule:
+                        await _send_rule_error(
+                            websocket, f"There are already {MAX_TOTAL_RULES} rules. "
+                            "Delete some archived ones first.")
+                    else:
                         if is_human:
-                            # Human-created rules go straight to draft, no card
-                            rules.make_draft(rule["id"])
+                            # The human's own rules take effect at once, no card;
+                            # over the active cap they wait in drafts.
+                            err = _activate_rule(rule["id"])
+                            if err:
+                                rules.make_draft(rule["id"])
+                                await _send_rule_error(websocket, f"Saved to drafts: {err}")
                         else:
                             # Agent proposals get a card in the timeline
                             channel = event.get("channel", "general")
@@ -1768,7 +1789,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif event.get("type") in ("decision_approve", "rule_activate"):
                 rid = event.get("id")
                 if rid is not None:
-                    rules.activate(int(rid))
+                    err = _activate_rule(int(rid))
+                    if err:
+                        await _send_rule_error(websocket, err)
                 continue
 
             elif event.get("type") in ("decision_unapprove", "rule_deactivate"):
@@ -2223,7 +2246,9 @@ async def resolve_rule_proposal(msg_id: int, request: Request):
     rule_id = meta.get("rule_id")
 
     if action == "activate" and rule_id is not None:
-        rules.activate(int(rule_id))
+        err = _activate_rule(int(rule_id))
+        if err:  # the card stays pending so it can be activated later
+            return JSONResponse({"error": err}, status_code=409)
         meta["status"] = "activated"
     elif action == "draft" and rule_id is not None:
         rules.make_draft(int(rule_id))

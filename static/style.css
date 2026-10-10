@@ -1693,6 +1693,14 @@ main#timeline {
     cursor: default;
 }
 
+.rules-error {
+    padding: 6px var(--sb-padding);
+    font-size: var(--sb-meta-fs);
+    color: var(--danger);
+    background: var(--danger-soft);
+    text-align: center;
+}
+
 .rules-soft-warning {
     padding: 4px var(--sb-padding);
     font-size: var(--sb-meta-fs);
@@ -1899,11 +1907,23 @@ main#timeline {
     opacity: 0.6;
 }
 
+@media (hover: none) {
+    .rule-actions {
+        opacity: 0.6;
+    }
+}
+
+.rule-card.editing .rule-actions {
+    display: none;
+}
+
 .rule-actions button {
     background: none;
     border: none;
     cursor: pointer;
     padding: 2px 4px;
+    font-size: 11px;
+    font-family: inherit;
     color: var(--text-dim);
     display: flex;
     align-items: center;
@@ -1916,7 +1936,7 @@ main#timeline {
     background: var(--white-06);
 }
 
-.rule-actions button.delete-btn:hover {
+.rule-actions button.rule-delete-btn:hover {
     opacity: 1;
     color: var(--danger);
     background: var(--danger-soft);
