@@ -83,64 +83,6 @@ MAX_CHANNELS = 8
 DEFAULT_HISTORY_PAGE_SIZE = 50
 MAX_HISTORY_PAGE_SIZE = 500
 
-# Agent hats (persisted to data/hats.json)
-agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
-
-
-def _hats_path() -> Path:
-    data_dir = config.get("server", {}).get("data_dir", "./data")
-    return Path(data_dir) / "hats.json"
-
-
-def _load_hats():
-    global agent_hats
-    p = _hats_path()
-    if p.exists():
-        try:
-            agent_hats = json.loads(p.read_text("utf-8"))
-        except Exception:
-            agent_hats = {}
-
-
-def _save_hats():
-    p = _hats_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(agent_hats), "utf-8")
-
-
-def _sanitize_svg(svg: str) -> str:
-    """Strip dangerous content from SVG string."""
-    svg = _re.sub(r'<script[^>]*>.*?</script>', '', svg, flags=_re.DOTALL | _re.IGNORECASE)
-    svg = _re.sub(r'\bon\w+\s*=', '', svg, flags=_re.IGNORECASE)
-    svg = _re.sub(r'javascript\s*:', '', svg, flags=_re.IGNORECASE)
-    return svg
-
-
-def set_agent_hat(agent: str, svg: str) -> str | None:
-    """Validate, sanitize, and store a hat SVG. Returns error string or None."""
-    svg = svg.strip()
-    if not svg.lower().startswith("<svg"):
-        return "Hat must be an SVG element (starts with <svg)."
-    if len(svg) > 5120:
-        return "Hat SVG too large (max 5KB)."
-    svg = _sanitize_svg(svg)
-    agent_hats[agent.lower()] = svg
-    _save_hats()
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_hats(), _event_loop)
-    return None
-
-
-def clear_agent_hat(agent: str):
-    """Remove an agent's hat."""
-    key = agent.lower()
-    if key in agent_hats:
-        del agent_hats[key]
-        _save_hats()
-        if _event_loop:
-            asyncio.run_coroutine_threadsafe(broadcast_hats(), _event_loop)
-
-
 def _settings_path() -> Path:
     data_dir = config.get("server", {}).get("data_dir", "./data")
     return Path(data_dir) / "settings.json"
@@ -536,7 +478,6 @@ def configure(cfg: dict, session_token: str = ""):
     store.on_message(_on_store_message)
 
     _load_settings()
-    _load_hats()
     if store.load_problems:
         _post_chat_log_damage_notice(log_path)
 
@@ -1221,9 +1162,9 @@ async def _handle_new_message(msg: dict):
     msg_type = msg.get("type", "chat")
     sender = msg.get("sender", "")
     channel = msg.get("channel", "general")
-    # Strip @mentions to find the slash command (e.g. "@claude @codex /hatmaking")
+    # Strip @mentions to find the slash command (e.g. "@claude @codex /poetry")
     stripped = _re.sub(r"@[\w-]+\s*", "", text).strip().lower()
-    _broadcast_cmds = ("/all", "/hatmaking", "/artchallenge", "/roastreview", "/poetry")
+    _broadcast_cmds = ("/all", "/artchallenge", "/roastreview", "/poetry")
     cmd_word = stripped.split()[0] if stripped else ""
     is_broadcast_cmd = cmd_word in _broadcast_cmds
     known_agents = set(registry.get_all_names()) if registry else set()
@@ -1233,12 +1174,10 @@ async def _handle_new_message(msg: dict):
     is_agent_session_draft = bool(draft_match and sender in known_agents)
     is_hidden_session_request = msg_type == "session_request"
 
-    is_agent_continue = (stripped == "/continue" and sender in known_agents)
     suppress_broadcast = (
         is_broadcast_cmd
         or is_hidden_session_request
         or is_agent_session_draft
-        or is_agent_continue
     )
 
     if not suppress_broadcast:
@@ -1254,15 +1193,6 @@ async def _handle_new_message(msg: dict):
         return
 
     # Check for slash commands — use stripped text (sans @mentions)
-    if stripped == "/continue":
-        if sender in known_agents:
-            store.add("system", f"Loop guard: only humans can /continue. {sender} tried to self-resume.", channel=channel)
-            return
-        router.continue_routing(channel)
-        store.add("system", f"Routing resumed by {sender}.", channel=channel)
-        await broadcast_status()
-        return
-
     if cmd_word == "/all":
         parts = stripped.split(None, 1)
         body = parts[1] if len(parts) > 1 else ""
@@ -1317,36 +1247,6 @@ async def _handle_new_message(msg: dict):
             f"{mentions} Art challenge! Create an SVG artwork with the theme: **{theme}**. "
             "Write your SVG code to a .svg file, then attach it using chat_send(image_path=...). "
             "Make it creative, keep it under 5KB. Let's see what you've got!",
-            channel=channel,
-            msg_type="online_broadcast",
-        )
-        return
-
-    if stripped == "/hatmaking":
-        agent_names = _get_channel_online_agent_bases(channel)
-        if not agent_names:
-            store.add(
-                "system",
-                f"No online channel agents with active tmux for #{channel}.",
-                msg_type="system",
-                channel=channel,
-            )
-            return
-        mentions = " ".join(f"@{a}" for a in agent_names)
-        all_instances = registry.get_all() if registry else {}
-        agents_cfg = config.get("agents", {})
-        color_parts = ", ".join(
-            f"{a}={all_instances[a]['color']}" if a in all_instances
-            else f"{a}={agents_cfg.get(a, {}).get('color', '#888')}"
-            for a in agent_names
-        )
-        store.add(
-            sender,
-            f"{mentions} Hat making time! Design a new hat for your avatar using SVG. "
-            "Use viewBox=\"0 0 32 16\" so it fits on top of a 32px avatar circle. "
-            f"Background is dark (#0f0f17). Avatar colors: {color_parts}. Design for good contrast! "
-            "Call chat_set_hat(sender=your_name, svg='<svg ...>...</svg>') to wear it. "
-            "Be creative — top hats, party hats, crowns, propeller beanies, whatever you want!",
             channel=channel,
             msg_type="online_broadcast",
         )
@@ -1435,7 +1335,7 @@ async def _handle_new_message(msg: dict):
             store.add(
                 "system",
                 f"Loop guard: {router.max_hops} agent-to-agent hops reached. "
-                "Type /continue to resume.",
+                "Send any message in this channel to resume.",
                 channel=channel
             )
         return
@@ -1617,17 +1517,6 @@ async def broadcast_session(action: str, session: dict):
     ws_clients.difference_update(dead)
 
 
-async def broadcast_hats():
-    data = json.dumps({"type": "hats", "data": agent_hats})
-    dead = set()
-    for client in list(ws_clients):
-        try:
-            await client.send_text(data)
-        except Exception:
-            dead.add(client)
-    ws_clients.difference_update(dead)
-
-
 async def broadcast_agents():
     """Send updated agent config (from registry) to all WebSocket clients."""
     agent_cfg = registry.get_agent_config() if registry else {}
@@ -1690,9 +1579,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Send rules
     await websocket.send_text(json.dumps({"type": "rules", "data": rules.list_all()}))
-
-    # Send hats
-    await websocket.send_text(json.dumps({"type": "hats", "data": agent_hats}))
 
     # Send jobs
     await websocket.send_text(json.dumps({"type": "jobs", "data": jobs.list_all()}))
@@ -1763,11 +1649,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         summaries.reset(channel)
                         await broadcast_clear(channel=channel)
                         continue
-                    if cmd == "/continue":
-                        router.continue_routing()
-                        store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
-                        await broadcast_status()
-                        continue
                     if cmd == "/sleep":
                         stopped = await _stop_channel_agent_terminals(channel)
                         if stopped["sessions"] or stopped["instances"]:
@@ -1806,7 +1687,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.
-                    if cmd in ("/all", "/hatmaking", "/artchallenge", "/roastreview", "/poetry"):
+                    if cmd in ("/all", "/artchallenge", "/roastreview", "/poetry"):
                         await _handle_new_message({"sender": sender, "text": text, "channel": channel})
                         continue
 
@@ -2195,13 +2076,6 @@ async def get_status():
 @app.get("/api/settings")
 async def get_settings():
     return room_settings
-
-
-@app.delete("/api/hat/{agent_name}")
-async def delete_hat(agent_name: str):
-    """Remove an agent's hat (called by the trash-can UI)."""
-    clear_agent_hat(agent_name)
-    return JSONResponse({"ok": True})
 
 
 # --- Jobs API ---

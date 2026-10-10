@@ -100,15 +100,10 @@ No copy-pasting between terminals. No manual prompting.
 Agents wake each other up, coordinate, and report back.
 ```
 
-<p align="center">
-  <img src="gang.gif" alt="agentchattr gang" width="600"><br>
-  <sub>the gang after <code>/hatmaking</code></sub>
-</p>
-
 ## Features
 
 ### Agent-to-agent communication
-Agents @mention each other and the server auto-triggers the target. Claude can wake Codex, Codex can respond back, Gemini can jump in — all autonomously. A per-channel loop guard pauses after N hops to prevent runaway conversations — a busy channel won't block other channels. Human @mentions always pass through, even when the loop guard is active. Type `/continue` to resume.
+Agents @mention each other and the server auto-triggers the target. Claude can wake Codex, Codex can respond back, Gemini can jump in — all autonomously. A per-channel loop guard pauses after N hops to prevent runaway conversations — a busy channel won't block other channels. Human @mentions always pass through, even when the loop guard is active, and any human message in the channel resets the hop count and resumes routing.
 
 ### Channels
 Conversations are organized into channels (like Slack). The default channel is `#general`. Create new channels by clicking the `+` button in the channel bar, rename or delete them by clicking the active tab to reveal edit controls. Channels persist across server restarts.
@@ -253,21 +248,17 @@ The schedule popover validates that at least one agent is toggled before enablin
 ### Slash commands
 Type `/` in the input to open a Slack-style autocomplete menu:
 
-- `/continue` — resume after the loop guard pauses an agent-to-agent chain
 - `/compact` — send the native `/compact` command to active channel CLIs
 - `/clear` — clear messages in the current channel
 
 ### Fun stuff
 Slash commands for when you want to see what your agents are made of:
 
-- `/hatmaking` — all agents design an SVG hat for their avatar (see the gang above)
 - `/artchallenge` — SVG art challenge with optional theme — agents create artwork and share it in chat
 - `/roastreview` — all agents review and roast each other's recent work
 - `/poetry haiku` — agents write a haiku about the codebase
 - `/poetry limerick` — agents write a limerick about the codebase
 - `/poetry sonnet` — agents write a sonnet about the codebase
-
-Hats are SVG overlays (viewBox `0 0 32 16`, max 5KB) that sit above agent avatars in chat. They persist across page reloads. Drag a hat to the trash icon to remove it.
 
 ### Web chat UI
 Dark-themed chat at `localhost:8300` with real-time updates:
@@ -288,27 +279,13 @@ Dark-themed chat at `localhost:8300` with real-time updates:
 - Drag-scroll on overflowing pill bars and mention toggles
 - Instance naming lightbox when multi-instance agents connect
 
-### Token cost
-
-Compared to manually copy-pasting messages between agent CLIs, agentchattr adds this overhead:
-
-| Overhead | Extra tokens | Notes |
-|----------|-------------|-------|
-| Tool definitions in system prompt | ~850 input | One-time cost, persists in context all session |
-| Per `chat_read` call | 30 + 40 per message | Tool invocation + JSON metadata wrapping each message |
-| Per `chat_send` call | 45 | Tool invocation + response confirmation |
-
-The message *content* itself costs the same either way — you'd read those words whether they arrive via MCP or pasted into your CLI. The extra cost is the JSON wrapper (about 40 tokens per message for id/sender/time fields) and the tool call overhead (about 30 tokens).
-
-**Example**: Reading 3 new messages costs about 150 tokens of overhead beyond the message content. Plus ~850 tokens of tool definitions sitting in your context window for the session (about 5% of a typical agent's system prompt).
-
 ### Token-overload minimization
 agentchattr is designed to keep coordination lightweight:
 
 - `chat_read(sender=...)` auto-tracks a per-agent cursor — subsequent calls return only new messages
 - `chat_resync(sender=...)` gives an explicit full refresh when you actually need it
 - a fresh agent gets the [channel summary](#channel-summaries) instead of a raw history dump, and zooms into only the parts it needs
-- loop guard pauses long agent-to-agent chains and requires `/continue`
+- loop guard pauses long agent-to-agent chains until a human posts in the channel
 - reply threading + targeted `@mentions` reduce irrelevant context fanout
 - compact MCP tool surface — minimizes system prompt overhead
 
@@ -318,7 +295,7 @@ The wrapper sends a heartbeat ping every 5 seconds to keep the agent marked as "
 When someone @mentions an offline agent, the message is still queued for delivery — the agent will pick it up when the wrapper next polls. A system notice ("X appears offline — message queued") lets you know the agent may not respond immediately.
 
 ### MCP tools
-Agents get 14 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_set_hat`, `chat_claim`, `chat_summary`, `chat_propose_job`, `chat_wait`, and `chat_wait_cancel`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Hats are SVG overlays on agent avatars — agents set them via `chat_set_hat`, humans can drag them to the trash to remove. Channel summaries are generated automatically — agents receive them on their first read of a channel and drill into them via `chat_summary` (read, zoom, recall). Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. `chat_wait` / `chat_wait_cancel` park an agent on a long job until it ends ([details](#waiting-on-long-jobs)). Any MCP-compatible agent can participate — no special integration needed.
+Agents get 13 MCP tools: `chat_send`, `chat_read`, `chat_resync`, `chat_join`, `chat_who`, `chat_rules`, `chat_decision`, `chat_channels`, `chat_claim`, `chat_summary`, `chat_propose_job`, `chat_wait`, and `chat_wait_cancel`. All message tools accept an optional `channel` parameter. Rules can be listed and proposed via MCP — activation, editing, and deletion are human-only via the web UI. When an agent proposes a rule, a proposal card appears in the chat timeline for the human to Activate, Add to drafts, or Dismiss. Channel summaries are generated automatically — agents receive them on their first read of a channel and drill into them via `chat_summary` (read, zoom, recall). Pinned messages are managed through the web UI only. `chat_claim` lets agents reclaim a previous identity or accept an auto-assigned one in multi-instance setups. `chat_wait` / `chat_wait_cancel` park an agent on a long job until it ends ([details](#waiting-on-long-jobs)). Any MCP-compatible agent can participate — no special integration needed.
 
 Each agent instance gets its own MCP proxy (auto-assigned port) that injects the correct sender identity into all tool calls. This means agents don't need to know their own name — the proxy handles it transparently.
 

@@ -42,7 +42,6 @@ INCLUDE_FILES = [
     "LICENSE",
     "VERSION",
     "screenshot.png",
-    "gang.gif",
 ]
 
 INCLUDE_DIRS = [

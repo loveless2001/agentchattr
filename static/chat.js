@@ -23,7 +23,6 @@ let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
 let ctrlEnterToSend = false;
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
-let agentHats = {};  // { agent_name: svg_string }
 let schedulesList = [];  // array of schedule objects from server
 let loadedChannelMessages = {};  // { channelName: [msg, ...] } currently loaded in the client
 let channelHistoryState = {};  // { channelName: { oldestLoadedId, hasMore, loading } }
@@ -716,7 +715,6 @@ function connectWebSocket() {
             const newColor = getColor(event.new_name);
             const newAvatar = getAvatarSvg(event.new_name);
             const newAgentKey = (resolveAgent(event.new_name.toLowerCase()) || event.new_name).toLowerCase();
-            const newHat = agentHats[newAgentKey] || '';
             document.querySelectorAll('#messages .message').forEach(el => {
                 // Regular chat messages
                 const senderEl = el.querySelector('.msg-sender');
@@ -735,19 +733,6 @@ function connectWebSocket() {
                         if (avatar) {
                             avatar.style.backgroundColor = newColor;
                             avatar.innerHTML = newAvatar;
-                        }
-                        // Update hat
-                        let hatEl = avatarWrap.querySelector('.hat-overlay');
-                        if (newHat) {
-                            if (!hatEl) {
-                                hatEl = document.createElement('div');
-                                hatEl.className = 'hat-overlay';
-                                avatarWrap.appendChild(hatEl);
-                            }
-                            hatEl.dataset.agent = newAgentKey;
-                            hatEl.innerHTML = newHat;
-                        } else if (hatEl) {
-                            hatEl.remove();
                         }
                     }
                 }
@@ -811,9 +796,6 @@ function connectWebSocket() {
             updateRulesBadge();
         } else if (event.type === 'rule' || event.type === 'decision') {
             handleRuleEvent(event.action, event.data);
-        } else if (event.type === 'hats') {
-            agentHats = event.data || {};
-            updateAllHats();
         } else if (event.type === 'schedules') {
             schedulesList = event.data || [];
             renderSchedulesBar();
@@ -1106,9 +1088,7 @@ function appendMessage(msg, opts = {}) {
         }
 
         const agentKey = (resolveAgent(msg.sender.toLowerCase()) || msg.sender).toLowerCase();
-        const hatSvg = agentHats[agentKey] || '';
-        const hatHtml = hatSvg ? `<div class="hat-overlay" data-agent="${escapeHtml(agentKey)}">${hatSvg}</div>` : '';
-        const avatarHtml = `<div class="avatar-wrap" data-agent="${escapeHtml(agentKey)}"><div class="avatar" style="background-color: ${senderColor}">${getAvatarSvg(msg.sender)}</div>${hatHtml}</div>`;
+        const avatarHtml = `<div class="avatar-wrap" data-agent="${escapeHtml(agentKey)}"><div class="avatar" style="background-color: ${senderColor}">${getAvatarSvg(msg.sender)}</div></div>`;
 
         const statusLabel = todoStatusLabel(todoStatus);
         el.dataset.rawText = msg.text;
@@ -1262,157 +1242,6 @@ function recolorMessages() {
         }
     }
 }
-
-// --- Hats ---
-
-function updateAllHats() {
-    // Update hat overlays on all message avatars
-    document.querySelectorAll('.avatar-wrap[data-agent]').forEach(wrap => {
-        const agent = wrap.dataset.agent;
-        const svg = agentHats[agent] || '';
-        let overlay = wrap.querySelector('.hat-overlay');
-
-        if (svg) {
-            if (!overlay) {
-                overlay = document.createElement('div');
-                overlay.className = 'hat-overlay';
-                overlay.dataset.agent = agent;
-                wrap.appendChild(overlay);
-            }
-            overlay.innerHTML = svg;
-        } else {
-            if (overlay) overlay.remove();
-        }
-    });
-}
-
-// --- Hat drag-to-trash ---
-
-const TRASH_SVG = `<svg viewBox="0 0 20 20" fill="none" width="20" height="20"><rect x="4" y="6" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M3 6h14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 3h4v3H8z" stroke="currentColor" stroke-width="1.2"/><rect class="trash-lid" x="3" y="4.5" width="14" height="2" rx="0.5" fill="currentColor" style="transform-origin: 10px 5.5px"/></svg>`;
-
-let hatDragState = null;  // { agent, ghostEl, originRect, trashEl, wrapEl }
-
-document.addEventListener('mousedown', (e) => {
-    const overlay = e.target.closest('.hat-overlay');
-    if (!overlay || hatDragState) return;
-    e.preventDefault();
-
-    const agent = overlay.dataset.agent;
-    const wrap = overlay.closest('.avatar-wrap');
-    if (!wrap) return;
-
-    const rect = overlay.getBoundingClientRect();
-
-    // Create drag ghost (fixed position, follows cursor)
-    const ghost = document.createElement('div');
-    ghost.className = 'hat-drag-ghost';
-    ghost.innerHTML = overlay.innerHTML;
-    ghost.style.width = rect.width + 'px';
-    ghost.style.height = rect.height + 'px';
-    ghost.style.left = rect.left + 'px';
-    ghost.style.top = rect.top + 'px';
-    document.body.appendChild(ghost);
-
-    // Hide original overlay
-    overlay.style.visibility = 'hidden';
-
-    // Create trash can to the left of the avatar-wrap
-    const trash = document.createElement('div');
-    trash.className = 'hat-trash';
-    trash.innerHTML = TRASH_SVG;
-    wrap.appendChild(trash);
-    // Force reflow then show
-    trash.offsetHeight;
-    trash.classList.add('visible');
-
-    hatDragState = { agent, ghostEl: ghost, originRect: rect, trashEl: trash, wrapEl: wrap, overlayEl: overlay };
-});
-
-document.addEventListener('mousemove', (e) => {
-    if (!hatDragState) return;
-    const { ghostEl, trashEl } = hatDragState;
-
-    // Move ghost to follow cursor (centered on cursor)
-    ghostEl.style.left = (e.clientX - ghostEl.offsetWidth / 2) + 'px';
-    ghostEl.style.top = (e.clientY - ghostEl.offsetHeight / 2) + 'px';
-
-    // Check proximity to trash for highlight
-    const trashRect = trashEl.getBoundingClientRect();
-    const ghostCX = e.clientX;
-    const ghostCY = e.clientY;
-    const overTrash = ghostCX >= trashRect.left - 12 && ghostCX <= trashRect.right + 12 &&
-                      ghostCY >= trashRect.top - 12 && ghostCY <= trashRect.bottom + 12;
-    trashEl.classList.toggle('hover', overTrash);
-});
-
-document.addEventListener('mouseup', (e) => {
-    if (!hatDragState) return;
-    const { agent, ghostEl, originRect, trashEl, wrapEl, overlayEl } = hatDragState;
-
-    // Check if dropped on trash
-    const trashRect = trashEl.getBoundingClientRect();
-    const overTrash = e.clientX >= trashRect.left - 12 && e.clientX <= trashRect.right + 12 &&
-                      e.clientY >= trashRect.top - 12 && e.clientY <= trashRect.bottom + 12;
-
-    if (overTrash) {
-        // Snap ghost to trash center, shrink, fade out
-        ghostEl.style.transition = 'all 0.25s ease-in';
-        ghostEl.style.left = (trashRect.left + trashRect.width / 2 - ghostEl.offsetWidth / 2) + 'px';
-        ghostEl.style.top = (trashRect.top + trashRect.height / 2 - ghostEl.offsetHeight / 2) + 'px';
-        ghostEl.style.transform = 'scale(0.2)';
-        ghostEl.style.opacity = '0';
-
-        // Chomp animation on trash
-        trashEl.classList.remove('hover');
-        trashEl.classList.add('chomping');
-
-        // Send DELETE to server
-        fetch(`/api/hat/${agent}`, {
-            method: 'DELETE',
-            headers: { 'X-Session-Token': SESSION_TOKEN },
-        }).catch(err => console.error('Hat delete failed:', err));
-
-        // Cleanup after animation
-        setTimeout(() => {
-            ghostEl.remove();
-            trashEl.remove();
-            if (overlayEl) overlayEl.remove();
-        }, 600);
-    } else {
-        // Return ghost to original position
-        ghostEl.style.transition = 'all 0.3s ease';
-        ghostEl.style.left = originRect.left + 'px';
-        ghostEl.style.top = originRect.top + 'px';
-
-        // Fade out trash
-        trashEl.classList.remove('hover', 'visible');
-
-        setTimeout(() => {
-            ghostEl.remove();
-            trashEl.remove();
-            overlayEl.style.visibility = '';
-        }, 300);
-    }
-
-    hatDragState = null;
-});
-
-// Cancel hat drag on Escape
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && hatDragState) {
-        const { ghostEl, originRect, trashEl, overlayEl } = hatDragState;
-        ghostEl.style.transition = 'all 0.3s ease';
-        ghostEl.style.left = originRect.left + 'px';
-        ghostEl.style.top = originRect.top + 'px';
-        trashEl.classList.remove('hover', 'visible');
-        setTimeout(() => {
-            ghostEl.remove();
-            trashEl.remove();
-            overlayEl.style.visibility = '';
-        }, 300);
-        hatDragState = null;
-    }
-});
 
 function buildStatusPills() {
     const container = document.getElementById('agent-status');
@@ -2012,12 +1841,10 @@ function showSlashHint(text) {
 const SLASH_COMMANDS = [
     { cmd: '/all', desc: 'Send to all online agents in this channel', broadcast: true },
     { cmd: '/artchallenge', desc: 'SVG art challenge — all agents create artwork (optional theme)', broadcast: true },
-    { cmd: '/hatmaking', desc: 'All agents design a hat to wear on their avatar', broadcast: true },
     { cmd: '/roastreview', desc: 'Get all agents to review and roast each other\'s work', broadcast: true },
     { cmd: '/poetry haiku', desc: 'Agents write a haiku about the codebase', broadcast: true },
     { cmd: '/poetry limerick', desc: 'Agents write a limerick about the codebase', broadcast: true },
     { cmd: '/poetry sonnet', desc: 'Agents write a sonnet about the codebase', broadcast: true },
-    { cmd: '/continue', desc: 'Resume after loop guard pauses', broadcast: false },
     { cmd: '/compact', desc: 'Send native /compact to active channel CLIs', broadcast: false },
     { cmd: '/sleep', desc: 'Stop auto-started agent terminals for this channel', broadcast: false },
     { cmd: '/clear', desc: 'Clear messages in current channel', broadcast: false },
@@ -2277,7 +2104,7 @@ function sendMessage() {
     if (!text && pendingAttachments.length === 0) return;
 
     // Prepend active mention toggles if the message doesn't already mention them
-    // Skip for non-broadcast slash commands (e.g. /clear, /continue)
+    // Skip for non-broadcast slash commands (e.g. /clear, /sleep)
     let skipMentions = false;
     if (text.startsWith('/')) {
         const cmdWord = text.split(/\s/)[0].toLowerCase();

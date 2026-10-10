@@ -73,13 +73,6 @@ class Router:
             # Don't route back to self
             return [m for m in mentions if m != sender]
 
-    def continue_routing(self, channel: str = "general"):
-        """Resume after loop guard pause."""
-        ch = self._get_ch(channel)
-        ch["hop_count"] = 0
-        ch["paused"] = False
-        ch["guard_emitted"] = False
-
     def is_paused(self, channel: str = "general") -> bool:
         return self._get_ch(channel)["paused"]
 

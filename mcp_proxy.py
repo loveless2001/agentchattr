@@ -45,7 +45,6 @@ _SENDER_PARAMS = {
     "chat_rules": "sender",
     "chat_decision": "sender",
     "chat_channels": None,
-    "chat_set_hat": "sender",
     "chat_claim": "sender",
     "chat_summary": "sender",
     "chat_propose_job": "sender",
