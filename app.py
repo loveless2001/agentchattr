@@ -288,13 +288,15 @@ def _channel_for_agent_instance(name: str) -> str:
         bound_channel = channel_bindings.find_channel_for_instance(name, registry)
         if bound_channel:
             return bound_channel
-    if registry:
-        inst = registry.get_instance(name)
-        base = inst.get("base") if inst else None
-        if base and name.startswith(f"{base}-"):
-            suffix = name[len(base) + 1:]
-            if suffix in room_settings.get("channels", ["general"]):
-                return suffix
+    inst = registry.get_instance(name) if registry else None
+    # A deregistered instance (crash timeout, /sleep) has no registry entry
+    # left, so fall back to the configured agent bases.
+    bases = [inst["base"]] if inst and inst.get("base") else list(config.get("agents", {}))
+    channels = room_settings.get("channels", ["general"])
+    for base in bases:
+        suffix = name[len(base) + 1:] if name.startswith(f"{base}-") else None
+        if suffix in channels:
+            return suffix
     return "general"
 
 

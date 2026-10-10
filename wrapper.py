@@ -835,7 +835,11 @@ def main():
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
-                        replacement = _register_instance(server_port, agent, args.label)
+                        # Keep the channel name (claude-gravity), or the wrapper
+                        # comes back as a channel-less claude-2 whose notices
+                        # all land in #general.
+                        replacement = _register_instance(server_port, agent, args.label,
+                                                         requested_name=requested_name)
                         set_runtime_identity(replacement["name"], replacement["token"])
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
