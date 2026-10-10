@@ -110,8 +110,8 @@ settings do not get committed.
 - `DownloadLinkService` for ephemeral local artifact links generated from
   message text at client delivery time.
 
-`configure()` also installs security middleware, loads persisted room settings
-and hats, registers store callbacks, starts background maintenance threads, and
+`configure()` also installs security middleware, loads persisted room settings,
+registers store callbacks, starts background maintenance threads, and
 starts the schedule runner.
 
 ## Browser Client
@@ -153,7 +153,6 @@ reloads to fetch fresh HTML and a fresh token.
 - agent config and base colors
 - todos
 - rules
-- hats
 - jobs
 - schedules
 - pending agent instances
@@ -175,7 +174,7 @@ Then it accepts browser events:
 Server-to-browser events are JSON objects with a `type` field. Key event types
 include `message`, `status`, `typing`, `settings`, `agents`, `base_colors`,
 `todos`, `todo_update`, `rules`, `rule`, `jobs`, `job`, `schedules`,
-`schedule`, `session`, `hats`, `delete`, `edit`, `clear`, `agent_renamed`,
+`schedule`, `session`, `delete`, `edit`, `clear`, `agent_renamed`,
 `channel_renamed`, `history_state`, and `pending_instance`.
 
 Before chat messages are sent to browsers, `app._decorate_message_for_client()`
@@ -195,10 +194,14 @@ Storage model:
 - Optional fields include `reply_to` and `metadata`.
 - Todos/pins are stored in `data/todos.json`.
 
-Clear behavior is non-destructive. `/clear` inserts an internal
-`clear_marker`, and read methods hide messages before the latest marker for
-that channel. When the active JSONL file exceeds 5 MB, hidden pre-marker
-messages are archived into numbered JSONL files.
+Clear behavior is non-destructive. `/clear` appends an internal
+`clear_marker` to the active log, and read methods hide messages before the
+latest marker for that channel. Archiving is lazy: after each `add()`, if the
+active JSONL file is 5 MB or more, every message hidden behind its own
+channel's latest marker moves into the next free `agentchattr_log.N.jsonl` and
+the active file is rewritten without it (details under Slash Commands →
+`/clear`). There is no new file per conversation; channels that are never
+cleared are never archived.
 
 Message deletion is destructive for selected message IDs. It rewrites the JSONL
 file, removes associated todos, and deletes uploaded attachment files referenced
@@ -224,8 +227,9 @@ Routing behavior:
 - Agent messages only route when they explicitly mention another target.
 - `@all` and `@both` expand to all known agent names.
 - Agent-to-agent hops increment the channel hop counter.
-- If the counter exceeds `max_agent_hops`, the channel is paused until a human
-  uses `/continue`.
+- If the counter exceeds `max_agent_hops`, the channel is paused and one
+  system notice says so. There is no resume command: the human's next message
+  in that channel resets the counter and unpauses it.
 
 `app._handle_new_message()` is the central message pipeline. It broadcasts the
 message, handles slash commands, transforms session draft blocks, computes
@@ -387,7 +391,6 @@ Registered tools:
 - `chat_rules`: list or propose rules.
 - `chat_decision`: backward-compatible alias for `chat_rules`.
 - `chat_channels`: list channels.
-- `chat_set_hat`: set an agent avatar hat SVG.
 - `chat_claim`: confirm or reclaim an identity in multi-instance setups.
 - `chat_summary`: read, zoom into, or regex-search (`recall`) the channel summary tree.
 - `chat_propose_job`: post a job proposal card for human approval.
@@ -431,7 +434,6 @@ Key REST endpoints in `app.py`:
 - `POST /api/send`: authenticated API-agent send endpoint.
 - `GET /api/status`: current agent availability/busy/role status.
 - `GET /api/settings`: room settings.
-- `DELETE /api/hat/{agent_name}`: remove an avatar hat.
 - `GET/POST/DELETE/PATCH /api/schedules...`: schedule management.
 - `GET/POST/PATCH/DELETE /api/jobs...`: job and job-message management.
 - `GET/POST /api/roles...`: role reads and updates.
@@ -706,34 +708,134 @@ channel's chat history.
   messages keep their lines.
 - `MessageStore.on_delete` turns a deleted message's leaf into
   `(message deleted)` and marks its ancestors stale; results computed from
-  the old content mid-flight are discarded. `/clear` resets the channel's tree, and channel rename moves it.
+  the old content mid-flight are discarded. Channel rename moves a tree.
+- `/clear` resets the channel's tree on purpose: the file is overwritten with
+  an empty tree, the old compressed lines are discarded (not archived), and
+  the new tree indexes only messages after the clear (see Slash Commands).
 
 Legacy `summary` timeline messages from the old manual `/summary` flow still
 render, but no new ones are created.
 
-## Hats, Pins, Slash Commands, and Utility Features
+## Slash Commands
 
-Hats:
+Commands are typed in the composer; the slash menu lists them
+(`SLASH_COMMANDS` in `static/chat.js`). The browser sends each one as a normal
+WebSocket `message` event, and the server handles them on two paths:
 
-- Stored in `data/hats.json`.
-- Set by `chat_set_hat`.
-- Sanitized by removing scripts, inline event handlers, and `javascript:`.
-- Limited to 5 KB and must start with `<svg`.
+- **Control commands** (`/clear`, `/sleep`, `/compact`) are
+  intercepted in the `/ws` handler (`app.py`) only when the text starts with
+  `/`. The raw command is never stored or broadcast. They are browser-only: an
+  agent posting `/clear` through `chat_send`, or an API agent through
+  `/api/send`, just posts that text as an ordinary message. The client never
+  prepends active mention toggles to them (`broadcast: false`).
+- **Broadcast commands** (`/all`, `/artchallenge`, `/roastreview`,
+  `/poetry`) are expanded by `_handle_new_message()`. It strips `@mentions`
+  and lowercases the text before matching, so `@claude /poetry` works, and agents can use them through `chat_send`. The raw command is never
+  broadcast; if it was already persisted (mention-prefixed or MCP path), it is
+  deleted from the store without a `delete` event.
 
-Pins/todos:
+### `/clear`
 
-- Stored in `data/todos.json`.
-- UI cycles message state through unpinned, todo, done, and cleared.
+Clears one channel (the current one). The settings bar's Clear button sends
+the same command after a confirm dialog.
 
-Slash commands:
+1. `MessageStore.clear(channel)` appends one `clear_marker` record to
+   `agentchattr_log.jsonl` via `_add_internal()` (persisted, no callbacks, no
+   broadcast). Nothing is deleted or moved, and no file is created yet.
+2. Every read then hides the channel's messages with ids before its latest
+   marker: `get_recent`, `get_since`, `get_before` (history pages),
+   `chat_read`, `chat_resync`, and summary `recall`. Only `get_by_id` still
+   finds them.
+3. `SummaryStore.reset(channel)` replaces the channel's summary tree with an
+   empty one and overwrites `data/summaries/<channel>.json` (by design). The
+   old compressed lines are discarded, not archived. Compressions in flight
+   for the channel are marked dirty, so `complete_job()` drops their results.
+   The new tree indexes only messages after the marker. A channel without a
+   tree is left alone; a later `ensure()` also sees only post-clear history.
+4. `broadcast_clear(channel)` sends `{"type": "clear", "channel": …}`; every
+   browser removes that channel's messages and resets its history paging.
+5. Archiving happens later. After the next `MessageStore.add()` in any
+   channel, `_maybe_archive()` runs: below 5 MB nothing happens (hidden
+   messages stay in the active log); at 5 MB or more, every message hidden
+   behind its own channel's latest marker, plus superseded markers, is written
+   to the next free `agentchattr_log.N.jsonl`. The active log is then
+   rewritten with the rest, and todos/pins of archived ids are dropped. Once
+   the log is large, each clear therefore yields one archive file holding that
+   channel's old messages.
 
-- `/continue`: resume routing after loop guard.
-- `/clear`: clear visible history for the current channel.
-- `/sleep`: stop auto-started terminals for the current channel.
-- `/compact`: inject native `/compact` into active channel CLIs.
-- `/all`: mention all online channel agents.
-- `/hatmaking`, `/artchallenge`, `/roastreview`, `/poetry`: expand into
-  agent-directed prompt messages.
+Not touched by `/clear`: the agents' CLI sessions (their context still holds
+the old conversation), their read cursors, jobs, rules, schedules, sessions,
+the loop guard, and uploaded files. The chat `/clear` is unrelated to a
+CLI-native `/clear` typed inside an agent's terminal. The wrapper's session
+monitor reports that one as a `clear` session event, which resets that
+agent's read cursors so its next read starts fresh with the summary header.
+
+### `/sleep`
+
+Stops the channel's agent terminals so the next `@mention` auto-starts fresh
+ones (`_stop_channel_agent_terminals()`). For each configured agent family:
+
+1. `ServerLauncher.kill_session("agentchattr-<agent>-<channel>")` kills the
+   matching wrapper processes first (TERM, then KILL after 2 s) so a detached
+   wrapper does not take the teardown for a crash and relaunch the CLI, then
+   the tmux session. tmux/Unix only; with no launcher this step is skipped.
+2. The channel's instance (the bound name from `channel_agent_bindings.json`,
+   else `<agent>-<channel>`) is deregistered if registered. Its runtime
+   identity is purged (presence, activity, read cursors, role, session context
+   state) along with its rename chain. If deregistering renamed a sibling back
+   (e.g. `claude-1` → `claude`), that identity and its message senders are
+   migrated and `agent_renamed` is broadcast.
+3. A system notice says either "Stopped auto-started agent terminals for
+   #<channel>. They will auto-start again on the next @mention." or that none
+   were running.
+
+Kept: channel bindings, chat history, the summary tree, and CLI transcripts
+on disk. The next `@mention` auto-starts a new wrapper; the new instance
+registers with empty cursors, so its first read carries the summary header.
+
+### `/compact`
+
+Compacts the context of the channel's running CLIs
+(`_compact_channel_agent_terminals()`).
+
+1. Targets: each family with a live `agentchattr-<agent>-<channel>` tmux
+   session whose channel instance (bound or `<agent>-<channel>`) is
+   registered, `active`, and online by MCP presence.
+2. Each target gets a queue entry with `inject_text: "/compact"`. The
+   wrapper's queue watcher types it into the CLI verbatim as a direct
+   injection (no wake prompt, role, or rules suffix).
+3. A system notice lists the agents it was sent to, or says no online channel
+   agents with active tmux were found.
+4. When the CLI compacts, the session monitor posts a `compact` session event.
+   The agent's next channel `chat_read` keeps its cursor and is prefixed once
+   with the channel summary header.
+
+### Broadcast Commands
+
+These reach only agents online in the channel (the same filter as
+`/compact`, by family name) and never auto-start one. With no such agent, a
+system notice says so and nothing else happens. Otherwise the expanded text
+is stored under the original sender with type `online_broadcast` and routed
+with `channel_online_only` (no auto-start), so each named agent gets a normal
+wake prompt.
+
+- `/all <text>` → `@a @b <text>`. The text comes from the lowercased command
+  line with `@mentions` removed.
+- `/roastreview` → asks the agents to inspect and constructively roast each
+  other's work.
+- `/artchallenge [theme]` → an SVG artwork on the theme (default "anything
+  you like", lowercased), written to a `.svg` file and attached with
+  `chat_send(image_path=...)`, under 5 KB.
+- `/poetry [haiku|limerick|sonnet]` → a poem about the current state of the
+  codebase; any other form falls back to haiku.
+
+`/roastreview` matches only exactly. With extra words it is still hidden as a
+command, but nothing expands it (see Open Questions).
+
+## Pins
+
+- Pins/todos are stored in `data/todos.json`.
+- The UI cycles a message through unpinned, todo, done, and cleared.
 
 ## Startup Scripts
 
@@ -772,7 +874,6 @@ Implemented controls:
 - Download links are random bearer tokens, scoped to configured allowlisted
   roots, short-lived, in-memory only, and revalidate file existence at request
   time.
-- SVG hats are sanitized and size-limited.
 - SVG file uploads are download-only, not inline-rendered.
 - Network binding warning and confirmation in `run.py`.
 
@@ -791,10 +892,10 @@ Important limitation:
 Under `data_dir`, usually `./data`:
 
 - `agentchattr_log.jsonl`: active timeline log.
-- `agentchattr_log.N.jsonl`: archived hidden history.
+- `agentchattr_log.N.jsonl`: archived hidden (pre-`/clear`) history, one file
+  per archive pass.
 - `todos.json`: pinned/todo state.
 - `settings.json`: room settings and channels.
-- `hats.json`: avatar hats.
 - `rules.json`: shared rules and epoch.
 - `summaries/<channel>.json`: channel summary trees (the old `summaries.json` is no longer used).
 - `jobs.json`: jobs and job messages.
@@ -837,7 +938,7 @@ Uploads are stored under the configured upload directory, usually `./uploads`.
 4. Router allows routing only if the agent explicitly mentioned another target.
 5. The per-channel hop count increments.
 6. If the hop limit is exceeded, routing pauses and a system notice asks a human
-   to use `/continue`.
+   to post in the channel, which resumes it.
 
 ### Agent Mentions a Local File
 
@@ -882,3 +983,8 @@ These points are implementation ambiguities worth confirming with maintainers:
 - Channel deletion removes the channel from settings and kills channel terminals
   but intentionally does not delete persisted history. `MessageStore.delete_channel()`
   exists but is not used by the current WebSocket delete-channel flow.
+- `/roastreview foo` (extra words) is hidden as a command
+  but not expanded. The raw text then goes through normal routing, which
+  drops it when `[routing].default` is `none`. With any other default, it
+  wakes that target and may auto-start it, although the message never
+  appears in the timeline.
