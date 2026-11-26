@@ -18,12 +18,14 @@ from mcp.server.fastmcp import Context, FastMCP
 
 import agent_session_state
 from agent_wait_conditions import describe as describe_wait
+import dashboard_agent_tools
 
 log = logging.getLogger(__name__)
 
 # Shared state — set by run.py before starting
 store = None
 rules = None
+dashboards = None  # set by run.py — DashboardStore instance
 summaries = None
 jobs = None  # set by run.py — JobStore instance
 room_settings = None  # set by run.py — dict with "channels" list etc.
@@ -119,7 +121,8 @@ _MCP_INSTRUCTIONS = (
     "This prevents over-use of the jobs feature for vague requests.\n\n"
     "To post a suggestion (Accept/Dismiss card) in a job, prefix your message with [suggestion]: "
     "chat_send(job_id=N, message='[suggestion] I recommend we refactor the auth module'). "
-    "The human can Accept (triggers you with context) or Dismiss."
+    "The human can Accept (triggers you with context) or Dismiss.\n\n"
+    + dashboard_agent_tools.DASHBOARD_INSTRUCTIONS
 )
 
 # --- Tool implementations (shared between both servers) ---
@@ -725,7 +728,7 @@ def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -
     join_channel = (channel or "general").strip() or "general"
     store.add(name, f"{name} is online", msg_type="join", channel=join_channel)
     online = _get_online()
-    return f"Joined. Online: {', '.join(online)}"
+    return f"Joined. Online: {', '.join(online)}" + dashboard_agent_tools.join_hint(join_channel)
 
 
 def chat_who() -> str:
@@ -973,6 +976,9 @@ _ALL_TOOLS = [
     chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
     chat_channels, chat_claim, chat_summary, chat_propose_job,
     chat_wait, chat_wait_cancel,
+    dashboard_agent_tools.chat_dashboard_read,
+    dashboard_agent_tools.chat_dashboard_set,
+    dashboard_agent_tools.chat_dashboard_remove,
 ]
 
 

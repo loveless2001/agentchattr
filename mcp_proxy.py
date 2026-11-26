@@ -48,6 +48,9 @@ _SENDER_PARAMS = {
     "chat_claim": "sender",
     "chat_summary": "sender",
     "chat_propose_job": "sender",
+    "chat_dashboard_read": None,
+    "chat_dashboard_set": "sender",
+    "chat_dashboard_remove": "sender",
 }
 
 

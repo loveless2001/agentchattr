@@ -1594,7 +1594,8 @@ main#timeline {
 
 /* --- Sidebar panels (rules + jobs shared) --- */
 
-#rules-panel {
+#rules-panel,
+#dashboard-panel {
     --panel-w: 320px;
     width: var(--panel-w);
     min-width: 220px;
@@ -1609,7 +1610,8 @@ main#timeline {
     position: relative;
 }
 
-#rules-panel.hidden {
+#rules-panel.hidden,
+#dashboard-panel.hidden {
     width: 0;
     min-width: 0;
     opacity: 0;
@@ -4175,6 +4177,7 @@ footer {
 
     /* --- Side panels overlay on mobile --- */
     #rules-panel,
+    #dashboard-panel,
     #jobs-panel {
         position: fixed;
         top: 0;
@@ -4187,6 +4190,7 @@ footer {
     }
 
     #rules-panel.hidden,
+    #dashboard-panel.hidden,
     #jobs-panel.hidden {
         margin-right: 0;
         transform: translateX(100%);
@@ -4195,6 +4199,7 @@ footer {
     }
 
     #rules-panel:not(.hidden),
+    #dashboard-panel:not(.hidden),
     #jobs-panel:not(.hidden) {
         transform: translateX(0);
         opacity: 1;

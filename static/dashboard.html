@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard · agentchattr</title>
+    <link rel="icon" href="/static/favicon.ico">
+    <link rel="stylesheet" href="/static/style.css?v=227">
+    <link rel="stylesheet" href="/static/dashboard.css?v=1">
+</head>
+
+<body class="dashboard-popout">
+    <header class="dashboard-popout-header">
+        <span id="dashboard-title">Dashboard</span>
+        <span class="dashboard-popout-status" id="dashboard-status">connecting…</span>
+    </header>
+    <!-- sandbox="": opaque origin, no scripts/forms/popups; see dashboard-render.js -->
+    <iframe id="dashboard-frame" sandbox="" referrerpolicy="no-referrer" title="Channel dashboard"></iframe>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/dashboard-render.js?v=1"></script>
+    <script src="/static/dashboard-popout.js?v=1"></script>
+</body>
+
+</html>

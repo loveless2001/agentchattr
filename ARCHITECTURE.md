@@ -175,7 +175,8 @@ Server-to-browser events are JSON objects with a `type` field. Key event types
 include `message`, `status`, `typing`, `settings`, `agents`, `base_colors`,
 `todos`, `todo_update`, `rules`, `rule`, `jobs`, `job`, `schedules`,
 `schedule`, `session`, `rule_error`, `delete`, `edit`, `clear`, `agent_renamed`,
-`channel_renamed`, `history_state`, and `pending_instance`.
+`channel_renamed`, `history_state`, `pending_instance`, and `dashboard`. A `dashboard` event
+carries `channel` and the full dashboard `data` snapshot after every change.
 
 Before chat messages are sent to browsers, `app._decorate_message_for_client()`
 may attach transient `metadata.downloads` entries. These entries are generated
@@ -407,6 +408,9 @@ Authentication and identity:
   and agents cannot impersonate another sender.
 - Base family names are rejected when authentication is required or when
   multiple active instances would make sender identity ambiguous.
+- `chat_dashboard_read`: read a channel dashboard, or one block (see Dashboards).
+- `chat_dashboard_set`: create or update a named dashboard block (HTML or Markdown).
+- `chat_dashboard_remove`: remove a named dashboard block.
 
 `chat_read` uses persisted cursors in `data/mcp_cursors.json`, cleared when an
 instance registers (a new instance has an empty context). First read returns
@@ -419,7 +423,9 @@ empty reads return increasingly explicit anti-polling hints.
 
 It forwards HTTP/SSE MCP traffic to the real MCP server, adds bearer auth
 headers, rewrites SSE callback endpoints back through the proxy, and injects
-the wrapper's current agent identity into supported tool calls.
+the wrapper's current agent identity into supported tool calls. For
+`chat_dashboard_set` and `chat_dashboard_remove` it stamps `sender`, so block
+edits are attributed to the calling agent.
 
 This is mainly useful for clients whose config mechanism cannot reliably attach
 dynamic headers or identity parameters itself.
@@ -448,6 +454,10 @@ Key REST endpoints in `app.py`:
 - `POST /api/open-path`: open local paths in native file manager.
 - `GET/POST/DELETE /api/sessions...`: session templates and runs.
 - `GET /api/version_check`: latest-release notifier.
+- `GET /api/dashboards/{channel}`, `POST .../clear`, `DELETE .../blocks/{name}`,
+  `POST .../undo`: channel dashboard reads and human edits (browser session
+  token only; agent bearer tokens get 403). Undo returns 409 when there is
+  nothing to undo.
 - `GET /uploads/{filename}`: serve uploaded artifacts.
 - `GET /downloads/{token}`: serve an ephemeral local file download by token.
 
@@ -458,6 +468,8 @@ agent-consumable text.
 
 Supported categories:
 
+- `GET /dashboard/{channel}`: read-only pop-out page for a channel dashboard
+  (browser session token injected; invalid channel names get 404).
 - Inline images: PNG, JPG/JPEG, GIF, WebP, BMP.
 - SVG: accepted only as a downloadable file; inline rendering is disabled.
 - Text and Markdown.
@@ -592,6 +604,50 @@ templates from `session_templates/`, and stores custom templates in
 `data/custom_templates.json`.
 
 Built-in templates:
+## Dashboards
+
+`dashboards.py` keeps one live dashboard per channel: a set of named blocks
+that agents maintain as a status board (progress, checklists, tables, notes).
+Storage is `data/dashboards/<channel>.json`, written atomically.
+
+Data model and versions:
+
+- Each block is HTML or Markdown, with an `editor` (the agent name) and a
+  version. A block version is the channel version at its last write. The
+  channel version is monotonic.
+- `base_version` gives per-block optimistic concurrency: `None` skips the
+  check, `0` means create-only, and a stale value returns `Error: conflict`.
+- Caps: 100 KB per block, 30 blocks, 1 MB total.
+- The last 20 changes are kept as inverse operations, which back Undo.
+
+Agent tools (`dashboard_agent_tools.py`, registered on the MCP bridge):
+`chat_dashboard_read(channel, block)`, `chat_dashboard_set(sender, block, html,
+channel, kind, base_version)`, and `chat_dashboard_remove(sender, block,
+channel)`. The MCP server instructions say when to use them. `chat_join`
+mentions existing blocks. The identity proxy stamps `sender` on set and remove.
+
+Guarantees:
+
+- Agent edits post nothing to chat and wake no one.
+- Human Clear posts one `system` notice. System messages never route, so no
+  agent wakes. Delete and Undo post nothing.
+- Every change broadcasts a `dashboard` WebSocket event with the snapshot.
+
+Human side (`dashboard_routes.py`, session token only): `GET
+/api/dashboards/{channel}`, `POST .../clear`, `DELETE .../blocks/{name}`, and
+`POST .../undo`. The browser panel (`static/dashboard-panel.js`) shows an
+unread dot on the header toggle when the active channel's dashboard changes
+while the panel is closed.
+`/clear` in a channel also clears its dashboard (undoable from the panel);
+deleting a channel keeps the dashboard file, like its chat history.
+
+Rendering (`static/dashboard-render.js`): blocks go into one sandboxed iframe
+with the CSP and sanitization described in [Security Model](#security-model).
+Built-in classes are `.grid`, `.stat`, `.progress`, `.badge` (`.ok`, `.warn`,
+`.err`), and `.checklist`. Tables are styled by default. `static/dashboard-popout.js`
+and `static/dashboard.html` drive the read-only pop-out page at
+`/dashboard/{channel}`.
+
 
 - Code Review
 - Debate
@@ -907,6 +963,12 @@ Important limitation:
 - Ephemeral download URLs are also bearer URLs. Anyone who receives one before
   it expires can download that file, so `[downloads].allowed_roots` should be
   narrow in LAN mode.
+- Channel dashboards: block HTML is rendered in one iframe with `sandbox=""`
+  (opaque origin, no scripts, forms or popups) under a CSP meta of
+  `default-src 'none'`. Block HTML is re-parsed with an inert `DOMParser`, and
+  `script`, `meta`, `base`, `link`, `iframe`, `frame`, `object`, `embed`,
+  `form` and `noscript` are stripped. Dashboard mutations by agents go through
+  MCP, and human mutations through the session-token REST API only.
 
 ## Persistence Files
 
@@ -929,6 +991,7 @@ Under `data_dir`, usually `./data`:
 - `renames.json`: persisted rename chains.
 - `channel_agent_bindings.json`: channel-to-instance bindings.
 - `{agent}_queue.jsonl`: per-agent trigger queue files.
+- `dashboards/<channel>.json`: channel live dashboards (blocks, channel and block versions, last 20 inverse ops for Undo). Written atomically; a channel rename moves the file.
 - `{agent}_recovered`: wrapper recovery flag files.
 - `provider-config/`: generated MCP config files, Claude session-hook settings
   and events (`{name}-session-*.json[l]`), CLI exit codes (`{name}-exit-code`).

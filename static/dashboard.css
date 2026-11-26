@@ -1,0 +1,136 @@
+/* --- Dashboard side panel (layout shared with #rules-panel in style.css) --- */
+
+#dashboard-panel {
+    --panel-w: 420px;
+}
+
+.dashboard-header-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+}
+
+.dashboard-btn {
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-dim);
+}
+
+.dashboard-btn:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
+.dashboard-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+#dashboard-blocks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    max-height: 30%;
+    overflow-y: auto;
+}
+
+#dashboard-blocks:empty {
+    display: none;
+}
+
+.dashboard-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    padding: 2px 4px 2px 8px;
+    border-radius: 99px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+}
+
+.dashboard-chip-name {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.dashboard-chip-meta {
+    color: var(--text-dim);
+}
+
+.dashboard-chip-del {
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 3px;
+}
+
+.dashboard-chip-del:hover {
+    color: var(--danger);
+}
+
+#dashboard-frame {
+    flex: 1;
+    width: 100%;
+    border: 0;
+    background: var(--bg);
+}
+
+/* Unread dot on the header toggle */
+.dashboard-dot {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--pending);
+}
+
+.dashboard-dot.hidden {
+    display: none;
+}
+
+#dashboard-toggle {
+    position: relative;
+}
+
+/* --- Pop-out page (/dashboard/<channel>) --- */
+
+body.dashboard-popout {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.dashboard-popout-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    font-weight: 600;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+}
+
+.dashboard-popout-status {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-dim);
+}

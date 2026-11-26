@@ -38,15 +38,19 @@ from agent_cache_keepalive import CacheKeepalive, KeepaliveConfig
 from agent_waits import WaitStore
 from channel_bindings import ChannelBindings
 from download_links import DownloadLinkService
+from dashboards import DashboardStore, DashboardError
+import dashboard_routes
 
 log = logging.getLogger(__name__)
 ROOT = Path(__file__).parent
 
 app = FastAPI(title="agentchattr")
+app.include_router(dashboard_routes.router)
 
 # --- globals (set by configure()) ---
 store: MessageStore | None = None
 rules: RuleStore | None = None
+dashboards: DashboardStore | None = None
 summaries: SummaryStore | None = None
 jobs: JobStore | None = None
 schedules: ScheduleStore | None = None
@@ -332,7 +336,7 @@ def _install_security_middleware(token: str, cfg: dict):
             # download tokens are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads/downloads use random filenames or tokens plus path checks.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/downloads/", "/api/roles")):
+            if path == "/" or path.startswith(("/static/", "/uploads/", "/downloads/", "/dashboard/", "/api/roles")):
                 return await call_next(request)
 
             # Agent registration/heartbeat: loopback only (no remote agent minting).
@@ -393,7 +397,7 @@ def _post_chat_log_damage_notice(log_path: Path):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, waits, cache_keepalive, router, agents, registry
+    global store, rules, dashboards, summaries, jobs, schedules, waits, cache_keepalive, router, agents, registry
     global session_store, session_engine, launcher, channel_bindings, download_links, config
     config = cfg
     # --- Security: store the session token and install middleware ---
@@ -421,6 +425,10 @@ def configure(cfg: dict, session_token: str = ""):
         legacy_decisions.rename(rules_path)
     rules = RuleStore(str(rules_path))
     rules.on_change(_on_rule_change)
+
+    # Per-channel live dashboards (agents write blocks, humans watch/clear/undo).
+    dashboards = DashboardStore(str(Path(data_dir) / "dashboards"))
+    dashboards.on_change(_on_dashboard_change)
 
     # Channel summary tree: indexed from chat history, compressed in the
     # background by a headless LLM CLI (see summaries.py).
@@ -773,6 +781,20 @@ def _on_job_change(action: str, data: dict):
     except RuntimeError:
         pass
     asyncio.run_coroutine_threadsafe(broadcast_job(action, data), _event_loop)
+
+
+def _on_dashboard_change(channel: str, snapshot: dict):
+    """Called from any thread (MCP tools or REST) when a dashboard changes."""
+    if _event_loop is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        if loop is _event_loop:
+            asyncio.ensure_future(broadcast_dashboard(channel, snapshot))
+            return
+    except RuntimeError:
+        pass
+    asyncio.run_coroutine_threadsafe(broadcast_dashboard(channel, snapshot), _event_loop)
 
 
 def _on_waits_change():
@@ -1508,6 +1530,18 @@ async def broadcast_job(action: str, data: dict):
     ws_clients.difference_update(dead)
 
 
+async def broadcast_dashboard(channel: str, snapshot: dict):
+    """Full snapshot per change (capped at ~1MB); clients just replace state."""
+    payload = json.dumps({"type": "dashboard", "channel": channel, "data": snapshot})
+    dead = set()
+    for client in list(ws_clients):
+        try:
+            await client.send_text(payload)
+        except Exception:
+            dead.add(client)
+    ws_clients.difference_update(dead)
+
+
 async def broadcast_schedule(action: str, schedule: dict):
     payload = json.dumps({"type": "schedule", "action": action, "data": schedule})
     dead = set()
@@ -1660,6 +1694,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cmd == "/clear":
                         store.clear(channel=channel)
                         summaries.reset(channel)
+                        # The dashboard goes with the channel (still undoable in its panel).
+                        if dashboards:
+                            try:
+                                dashboards.clear(channel, sender)
+                            except DashboardError:
+                                pass
                         await broadcast_clear(channel=channel)
                         continue
                     if cmd == "/sleep":
@@ -1960,6 +2000,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 room_settings["channels"][idx] = new_name
                 store.rename_channel(old_name, new_name)
                 summaries.rename(old_name, new_name)
+                if dashboards:
+                    dashboards.rename(old_name, new_name)
                 if channel_bindings:
                     channel_bindings.rename_channel(old_name, new_name)
                 import mcp_bridge

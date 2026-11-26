@@ -132,10 +132,11 @@ def main():
     configure(config, session_token=session_token)
 
     # Share stores with the MCP bridge
-    from app import store, rules, summaries, jobs, waits, room_settings, registry, router as app_router, agents as app_agents, session_engine, session_store
+    from app import store, rules, dashboards, summaries, jobs, waits, room_settings, registry, router as app_router, agents as app_agents, session_engine, session_store
     import mcp_bridge
     mcp_bridge.store = store
     mcp_bridge.rules = rules
+    mcp_bridge.dashboards = dashboards
     mcp_bridge.summaries = summaries
     mcp_bridge.jobs = jobs
     mcp_bridge.room_settings = room_settings
@@ -185,18 +186,29 @@ def main():
 
     static_dir = ROOT / "static"
 
-    @app.get("/")
-    async def index():
-        # Read index.html fresh each request so changes take effect without restart.
+    def _page_with_token(filename: str) -> HTMLResponse:
+        # Read the page fresh each request so changes take effect without restart.
         # Inject the session token into the HTML so the browser client can use it.
         # This is safe: same-origin policy prevents cross-origin pages from reading
         # the response body, so only the user's own browser tab gets the token.
-        html = (static_dir / "index.html").read_text("utf-8")
+        html = (static_dir / filename).read_text("utf-8")
         injected = html.replace(
             "</head>",
             f'<script>window.__SESSION_TOKEN__="{session_token}";</script>\n</head>',
         )
         return HTMLResponse(injected, headers={"Cache-Control": "no-store"})
+
+    @app.get("/")
+    async def index():
+        return _page_with_token("index.html")
+
+    @app.get("/dashboard/{channel}")
+    async def dashboard_popout(channel: str):
+        # Read-only pop-out view of one channel's dashboard (static/dashboard.html).
+        from app import _CHANNEL_NAME_RE
+        if not _CHANNEL_NAME_RE.match(channel):
+            return HTMLResponse("Unknown channel", status_code=404)
+        return _page_with_token("dashboard.html")
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

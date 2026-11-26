@@ -242,6 +242,7 @@ function init() {
     setupSettingsKeys();
     setupKeyboardShortcuts();
     RulesPanel.init();
+    DashboardPanel.init();
     Jobs.init();
     Sessions.init();
     Channels.init();

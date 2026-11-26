@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/style.css?v=227">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=224">
+    <link rel="stylesheet" href="/static/dashboard.css?v=1">
     <link rel="icon" href="/static/favicon.ico">
 </head>
 
@@ -43,6 +44,15 @@
                             stroke-linejoin="round" fill="none" />
                     </svg>
                     <span class="rules-badge hidden" id="rules-badge">0</span>
+                </button>
+                <button class="settings-btn" id="dashboard-toggle" onclick="toggleDashboardPanel()" title="Dashboard">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <rect x="2" y="2" width="5" height="6" rx="1" stroke="currentColor" stroke-width="1.2" />
+                        <rect x="9" y="2" width="5" height="3.5" rx="1" stroke="currentColor" stroke-width="1.2" />
+                        <rect x="2" y="10" width="5" height="4" rx="1" stroke="currentColor" stroke-width="1.2" />
+                        <rect x="9" y="7.5" width="5" height="6.5" rx="1" stroke="currentColor" stroke-width="1.2" />
+                    </svg>
+                    <span class="dashboard-dot hidden" id="dashboard-dot"></span>
                 </button>
                 <button class="settings-btn" id="pins-toggle" onclick="togglePinsPanel()" title="Pinned messages">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -235,6 +245,19 @@
                 </div>
                 <div id="rules-list"></div>
             </aside>
+            <aside id="dashboard-panel" class="hidden">
+                <div class="rules-header">
+                    <span id="dashboard-title">Dashboard</span>
+                    <div class="dashboard-header-actions">
+                        <button class="dashboard-btn" id="dashboard-undo" onclick="DashboardPanel.undo()" title="Undo the last dashboard change">Undo</button>
+                        <button class="dashboard-btn" id="dashboard-clear" onclick="DashboardPanel.clearAll()" title="Remove every block">Clear</button>
+                        <button class="dashboard-btn" onclick="DashboardPanel.popOut()" title="Open in a new window">Pop out</button>
+                    </div>
+                </div>
+                <div id="dashboard-blocks"></div>
+                <!-- sandbox="": opaque origin, no scripts/forms/popups; see dashboard-render.js -->
+                <iframe id="dashboard-frame" sandbox="" referrerpolicy="no-referrer" title="Channel dashboard"></iframe>
+            </aside>
         </div>
 
         <div id="scroll-anchor" class="hidden" onclick="scrollToBottom()"><span class="unread-badge">0</span><svg
@@ -366,7 +389,9 @@
     <script src="/static/jobs.js?v=227"></script>
     <script src="/static/channels.js?v=226"></script>
     <script src="/static/rules-panel.js?v=223"></script>
-    <script src="/static/chat.js?v=227"></script>
+    <script src="/static/dashboard-render.js?v=1"></script>
+    <script src="/static/dashboard-panel.js?v=1"></script>
+    <script src="/static/chat.js?v=228"></script>
 </body>
 
 </html>
