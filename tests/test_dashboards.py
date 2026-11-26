@@ -154,6 +154,17 @@ class DashboardStoreTest(unittest.TestCase):
         self.store.rename("empty", "gone")                        # no dashboard: leftover removed
         self.assertFalse((self.dir / "gone.json").exists())
 
+    def test_requested_by_sticks_through_updates_and_undo(self):
+        self.store.set_block("general", "a", "x", "claude")
+        self.assertIsNone(self.store.get("general")["blocks"][0]["requested_by"])
+        snap = self.store.set_block("general", "a", "x", "claude", requested_by="ben")
+        self.assertEqual(snap["version"], 2)                      # marking alone is a change
+        self.store.set_block("general", "a", "y", "claude")       # later update keeps the mark
+        self.assertEqual(self.store.get("general")["blocks"][0]["requested_by"], "ben")
+        self.store.undo("general", "user")
+        self.store.undo("general", "user")
+        self.assertIsNone(self.store.get("general")["blocks"][0]["requested_by"])
+
     def test_rename_moves_file(self):
         self.store.set_block("old", "a", "x", "claude")
         self.store.rename("old", "new")

@@ -102,8 +102,16 @@ class DashboardE2E(unittest.TestCase):
         self.assertNotIn("<i>o</i>", text)
         self.assertIn("dashboard: 2 blocks (tests, other)",
                       self.server.mcp(self.agent, "chat_join", name=self.agent["name"]))
-        unknown = self.server.mcp(self.agent, "chat_dashboard_set", block="x", html="y", channel="nope")
-        self.assertTrue(unknown.startswith("Error: unknown channel"), unknown)
+
+    def test_agents_edit_only_their_own_channel(self):
+        # An unbound agent belongs to #general: no channel means #general, others are refused.
+        ok = self.server.mcp(self.agent, "chat_dashboard_set", block="mine", html="x")
+        self.assertIn("on #general dashboard", ok)
+        for tool, extra in (("chat_dashboard_set", {"html": "y"}), ("chat_dashboard_remove", {})):
+            out = self.server.mcp(self.agent, tool, block="mine", channel="other", **extra)
+            self.assertIn("may only edit the #general dashboard, not #other", out)
+        self.assertEqual([b["name"] for b in self.get()["blocks"]], ["mine"])
+        self.assertIn("--- mine", self.server.mcp(self.agent, "chat_dashboard_read", channel="general"))
 
     def test_human_clear_notice_undo_and_delete(self):
         for name in ("a", "b"):
@@ -130,6 +138,22 @@ class DashboardE2E(unittest.TestCase):
         self.assertEqual(self.get()["blocks"], [])
         self.server.http("POST", "/api/dashboards/general/undo")
         self.assertEqual([b["name"] for b in self.get()["blocks"]], ["a"])
+
+    def test_requested_badge_is_verified_against_the_human(self):
+        from test_rules_usability_e2e import browser_events
+        say = lambda text: browser_events(self.server, [
+            {"type": "message", "text": text, "channel": "general"}], settle=0.5)
+        say("just thinking out loud, no mention here")
+        out = self.server.mcp(self.agent, "chat_dashboard_set", block="r", html="x", requested=True)
+        self.assertIn("Not marked as requested", out)
+        self.assertIsNone(self.get()["blocks"][0]["requested_by"])
+        say(f"@{self.agent['name'].split('-')[0]} please track the loss on the dashboard")
+        out = self.server.mcp(self.agent, "chat_dashboard_set", block="r", html="y", requested=True)
+        self.assertIn("Marked as per user's request", out)
+        human = self.get()["blocks"][0]["requested_by"]
+        self.assertTrue(human)
+        self.assertIn(f"requested by {human}",
+                      self.server.mcp(self.agent, "chat_dashboard_read", block="r"))
 
     def test_undo_with_nothing_left_is_409(self):
         while self.status_of("POST", "/api/dashboards/general/undo") == 200:

@@ -1,7 +1,8 @@
 """Per-channel live dashboards: named HTML/markdown blocks agents keep up to date.
 
 One file per channel, data/dashboards/<channel>.json:
-  {"channel", "version", "blocks": [{name, kind, html, editor, updated_at, version}],
+  {"channel", "version", "blocks": [{name, kind, html, editor, updated_at, version,
+                                     requested_by}],
    "history": [inverse ops, newest last]}
 The channel version only goes up; a block's version is the channel version at
 its last write, so agents editing different blocks never conflict. History holds
@@ -135,9 +136,12 @@ class DashboardStore:
     # --- mutations ---
 
     def set_block(self, channel: str, name: str, html: str, editor: str,
-                  kind: str = "html", base_version: int | None = None) -> dict:
+                  kind: str = "html", base_version: int | None = None,
+                  requested_by: str | None = None) -> dict:
         """Create or replace a block in place. base_version: None = no check,
-        0 = must not exist yet, N = must equal the block's current version."""
+        0 = must not exist yet, N = must equal the block's current version.
+        requested_by: the human who asked for this block (verified by the caller);
+        once set it stays with the block through later updates."""
         name = (name or "").strip()
         if not _BLOCK_RE.fullmatch(name):
             raise DashboardError("Block name must be 1-40 chars: letters, digits, space, _ . : -")
@@ -151,7 +155,9 @@ class DashboardStore:
             state = self._state(channel)
             idx = self._find(state, name)
             prev = state["blocks"][idx] if idx >= 0 else None
+            requested_by = requested_by or (prev or {}).get("requested_by")
             if prev and prev["html"] == html and prev["kind"] == kind and \
+                    prev.get("requested_by") == requested_by and \
                     base_version in (None, prev["version"]):
                 # Unchanged: no version bump, broadcast or history (keeps the undo trail).
                 return self._snapshot(state)
@@ -169,7 +175,8 @@ class DashboardStore:
                 raise DashboardError(f"Dashboard too large: max {MAX_TOTAL_BYTES} bytes in all")
             state["version"] += 1
             block = {"name": name, "kind": kind, "html": html, "editor": editor,
-                     "updated_at": time.time(), "version": state["version"]}
+                     "updated_at": time.time(), "version": state["version"],
+                     "requested_by": requested_by}
             if prev is None:
                 idx = len(state["blocks"])
                 state["blocks"].append(block)

@@ -63,6 +63,11 @@
     font-weight: 600;
 }
 
+.dashboard-chip-req {
+    color: var(--success);
+    font-weight: 600;
+}
+
 .dashboard-chip-meta {
     color: var(--text-dim);
 }

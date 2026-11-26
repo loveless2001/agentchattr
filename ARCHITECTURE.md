@@ -619,12 +619,23 @@ Data model and versions:
   check, `0` means create-only, and a stale value returns `Error: conflict`.
 - Caps: 100 KB per block, 30 blocks, 1 MB total.
 - The last 20 changes are kept as inverse operations, which back Undo.
+- `requested_by` names the human who asked for the block. Once set it stays
+  through later updates of that block (and Undo restores it with the block).
 
 Agent tools (`dashboard_agent_tools.py`, registered on the MCP bridge):
 `chat_dashboard_read(channel, block)`, `chat_dashboard_set(sender, block, html,
-channel, kind, base_version)`, and `chat_dashboard_remove(sender, block,
-channel)`. The MCP server instructions say when to use them. `chat_join`
+channel, kind, base_version, requested)`, and `chat_dashboard_remove(sender,
+block, channel)`. The MCP server instructions say when to use them. `chat_join`
 mentions existing blocks. The identity proxy stamps `sender` on set and remove.
+
+- Channel scope: an agent may read any dashboard but only edit its own
+  channel's, resolved with `_channel_for_agent_instance` (channel binding, then
+  the `<base>-<channel>` name suffix, else `general`). `channel` defaults to it.
+- Request mark: `requested=true` is verified server side. The human's latest
+  message in the channel must @mention the agent (its name, its base family,
+  `@all` or `@both`). Then the block gets `requested_by` and shows a "per
+  user's request" badge. Otherwise the block is still written, unmarked, and
+  the reply says why.
 
 Guarantees:
 
@@ -644,7 +655,9 @@ deleting a channel keeps the dashboard file, like its chat history.
 Rendering (`static/dashboard-render.js`): blocks go into one sandboxed iframe
 with the CSP and sanitization described in [Security Model](#security-model).
 Built-in classes are `.grid`, `.stat`, `.progress`, `.badge` (`.ok`, `.warn`,
-`.err`), and `.checklist`. Tables are styled by default. `static/dashboard-popout.js`
+`.err`), and `.checklist`. Tables are styled by default. Markdown blocks use
+the pinned local copy of marked (`static/lib/marked-15.0.12.min.js`, also used
+by the chat page; no CDN). `static/dashboard-popout.js`
 and `static/dashboard.html` drive the read-only pop-out page at
 `/dashboard/{channel}`.
 

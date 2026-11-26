@@ -38,6 +38,7 @@ const DashboardPanel = (() => {
             const name = DashboardRender.esc(b.name);
             return `<div class="dashboard-chip" title="v${b.version}">
                 <span class="dashboard-chip-name">${name}</span>
+                ${b.requested_by ? `<span class="dashboard-chip-req" title="Requested by ${DashboardRender.esc(b.requested_by)}">requested</span>` : ''}
                 <span class="dashboard-chip-meta">${DashboardRender.esc(b.editor)} · ${DashboardRender.relativeAge(b.updated_at)}</span>
                 <button class="dashboard-chip-del" data-block="${name}" title="Delete block">×</button>
             </div>`;

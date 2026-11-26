@@ -34,6 +34,8 @@ p { margin: 0.4em 0; }
 .dash-head { padding: 5px 10px; font-size: 11px; color: var(--text-dim);
   border-bottom: 1px solid var(--border); }
 .dash-head b { color: var(--text); font-weight: 600; }
+.dash-req { float: right; padding: 0 7px; border-radius: 99px; font-weight: 600;
+  background: var(--success-soft); color: var(--success); }
 .dash-body { padding: 10px; overflow-x: auto; }
 .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
 .stat { background: var(--bg-header); border: 1px solid var(--border); border-radius: 6px;
@@ -103,6 +105,8 @@ svg, img { max-width: 100%; height: auto; }
         const blocks = (snapshot && snapshot.blocks) || [];
         const body = blocks.length
             ? blocks.map(b => `<section class="dash-block"><header class="dash-head"><b>${esc(b.name)}</b>`
+                + (b.requested_by ? `<span class="dash-req" title="Requested by ${esc(b.requested_by)}">`
+                    + "per user's request</span>" : '')
                 + ` · ${esc(b.editor)} · ${esc(clockTime(b.updated_at))}</header>`
                 + `<div class="dash-body">${sanitizeBlock(b)}</div></section>`).join('\n')
             : '<div class="dash-empty">No dashboard yet. Agents add blocks with chat_dashboard_set.</div>';
