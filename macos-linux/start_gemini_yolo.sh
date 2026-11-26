@@ -70,4 +70,4 @@ if ! is_server_healthy; then
     exit 1
 fi
 
-.venv/bin/python wrapper.py gemini --yolo
+.venv/bin/python wrapper.py gemini --dangerously-skip-permissions

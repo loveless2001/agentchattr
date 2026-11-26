@@ -345,10 +345,20 @@ Session monitor and crash recovery (`agent_session_monitor.py`,
 Provider MCP injection:
 
 - Claude uses `--mcp-config` with a generated config file.
-- Gemini uses an environment variable pointing at a generated settings file.
+- Gemini runs the Antigravity CLI (`agy`), which has no per-session MCP config
+  and reads `$HOME/.gemini/config/mcp_config.json` (no env var expansion). The
+  wrapper starts a local per-instance MCP proxy and launches agy with `HOME`
+  set to `data/agy-home/<instance>/`: an overlay that symlinks the real home,
+  `~/.gemini/` and `~/.gemini/config/` entries, with a real `mcp_config.json`
+  pointing at the proxy. Concurrent agy instances stay isolated and the real
+  agy config is never written. On Windows (no overlay: agy reads USERPROFILE
+  and symlinks need Developer Mode) the wrapper writes the entry into the real
+  config and removes it on exit if it still points at its proxy; Windows
+  wrappers are started by hand, one per agent.
 - Codex uses a local per-instance MCP proxy and CLI `-c` config arguments.
 - Kimi uses `--mcp-config-file`.
-- Custom agents can use `settings_file`, `env`, `flag`, or `proxy_flag`.
+- Custom agents can use `settings_file`, `env`, `flag`, `proxy_flag`, or
+  `proxy_agy_config`.
 
 Queue watcher behavior:
 
@@ -398,6 +408,9 @@ Registered tools:
 - `chat_wait` / `chat_wait_cancel`: park the agent on a long job until a
   process exits, a file appears, a log line matches or a timeout passes (see
   Waits and Cache Keepalive).
+- `chat_dashboard_read`: read a channel dashboard, or one block (see Dashboards).
+- `chat_dashboard_set`: create or update a named dashboard block (HTML or Markdown).
+- `chat_dashboard_remove`: remove a named dashboard block.
 
 Authentication and identity:
 
@@ -408,9 +421,6 @@ Authentication and identity:
   and agents cannot impersonate another sender.
 - Base family names are rejected when authentication is required or when
   multiple active instances would make sender identity ambiguous.
-- `chat_dashboard_read`: read a channel dashboard, or one block (see Dashboards).
-- `chat_dashboard_set`: create or update a named dashboard block (HTML or Markdown).
-- `chat_dashboard_remove`: remove a named dashboard block.
 
 `chat_read` uses persisted cursors in `data/mcp_cursors.json`, cleared when an
 instance registers (a new instance has an empty context). First read returns
@@ -444,6 +454,10 @@ Key REST endpoints in `app.py`:
 - `GET/POST/PATCH/DELETE /api/jobs...`: job and job-message management.
 - `GET/POST /api/roles...`: role reads and updates.
 - `GET/POST /api/rules...`: rules, reminders, and freshness.
+- `GET /api/dashboards/{channel}`, `POST .../clear`, `DELETE .../blocks/{name}`,
+  `POST .../undo`: channel dashboard reads and human edits (browser session
+  token only; agent bearer tokens get 403). Undo returns 409 when there is
+  nothing to undo.
 - `POST /api/register`: wrapper registration.
 - `POST /api/deregister/{name}`: wrapper deregistration.
 - `POST /api/label/{name}`: rename agent identity/label.
@@ -454,10 +468,8 @@ Key REST endpoints in `app.py`:
 - `POST /api/open-path`: open local paths in native file manager.
 - `GET/POST/DELETE /api/sessions...`: session templates and runs.
 - `GET /api/version_check`: latest-release notifier.
-- `GET /api/dashboards/{channel}`, `POST .../clear`, `DELETE .../blocks/{name}`,
-  `POST .../undo`: channel dashboard reads and human edits (browser session
-  token only; agent bearer tokens get 403). Undo returns 409 when there is
-  nothing to undo.
+- `GET /dashboard/{channel}`: read-only pop-out page for a channel dashboard
+  (browser session token injected; invalid channel names get 404).
 - `GET /uploads/{filename}`: serve uploaded artifacts.
 - `GET /downloads/{token}`: serve an ephemeral local file download by token.
 
@@ -468,8 +480,6 @@ agent-consumable text.
 
 Supported categories:
 
-- `GET /dashboard/{channel}`: read-only pop-out page for a channel dashboard
-  (browser session token injected; invalid channel names get 404).
 - Inline images: PNG, JPG/JPEG, GIF, WebP, BMP.
 - SVG: accepted only as a downloadable file; inline rendering is disabled.
 - Text and Markdown.
@@ -594,16 +604,6 @@ Human actions:
   if closed); a refused proposal-card Activate gets HTTP 409 and the card
   stays pending.
 
-## Sessions
-
-Sessions orchestrate structured multi-agent workflows with templates, roles,
-phases, and turn-taking.
-
-`session_store.py` persists runs in `data/session_runs.json`, loads built-in
-templates from `session_templates/`, and stores custom templates in
-`data/custom_templates.json`.
-
-Built-in templates:
 ## Dashboards
 
 `dashboards.py` keeps one live dashboard per channel: a set of named blocks
@@ -648,6 +648,16 @@ Built-in classes are `.grid`, `.stat`, `.progress`, `.badge` (`.ok`, `.warn`,
 and `static/dashboard.html` drive the read-only pop-out page at
 `/dashboard/{channel}`.
 
+## Sessions
+
+Sessions orchestrate structured multi-agent workflows with templates, roles,
+phases, and turn-taking.
+
+`session_store.py` persists runs in `data/session_runs.json`, loads built-in
+templates from `session_templates/`, and stores custom templates in
+`data/custom_templates.json`.
+
+Built-in templates:
 
 - Code Review
 - Debate
@@ -953,6 +963,12 @@ Implemented controls:
   time.
 - SVG file uploads are download-only, not inline-rendered.
 - Network binding warning and confirmation in `run.py`.
+- Channel dashboards: block HTML is rendered in one iframe with `sandbox=""`
+  (opaque origin, no scripts, forms or popups) under a CSP meta of
+  `default-src 'none'`. Block HTML is re-parsed with an inert `DOMParser`, and
+  `script`, `meta`, `base`, `link`, `iframe`, `frame`, `object`, `embed`,
+  `form` and `noscript` are stripped. Dashboard mutations by agents go through
+  MCP, and human mutations through the session-token REST API only.
 
 Important limitation:
 
@@ -963,12 +979,6 @@ Important limitation:
 - Ephemeral download URLs are also bearer URLs. Anyone who receives one before
   it expires can download that file, so `[downloads].allowed_roots` should be
   narrow in LAN mode.
-- Channel dashboards: block HTML is rendered in one iframe with `sandbox=""`
-  (opaque origin, no scripts, forms or popups) under a CSP meta of
-  `default-src 'none'`. Block HTML is re-parsed with an inert `DOMParser`, and
-  `script`, `meta`, `base`, `link`, `iframe`, `frame`, `object`, `embed`,
-  `form` and `noscript` are stripped. Dashboard mutations by agents go through
-  MCP, and human mutations through the session-token REST API only.
 
 ## Persistence Files
 
@@ -981,6 +991,7 @@ Under `data_dir`, usually `./data`:
 - `settings.json`: room settings and channels.
 - `rules.json`: shared rules and epoch.
 - `summaries/<channel>.json`: channel summary trees (the old `summaries.json` is no longer used).
+- `dashboards/<channel>.json`: channel live dashboards (blocks, channel and block versions, last 20 inverse ops for Undo). Written atomically; a channel rename moves the file.
 - `jobs.json`: jobs and job messages.
 - `schedules.json`: scheduled prompts.
 - `waits.json`: registered agent waits (`chat_wait`).
@@ -991,7 +1002,6 @@ Under `data_dir`, usually `./data`:
 - `renames.json`: persisted rename chains.
 - `channel_agent_bindings.json`: channel-to-instance bindings.
 - `{agent}_queue.jsonl`: per-agent trigger queue files.
-- `dashboards/<channel>.json`: channel live dashboards (blocks, channel and block versions, last 20 inverse ops for Undo). Written atomically; a channel rename moves the file.
 - `{agent}_recovered`: wrapper recovery flag files.
 - `provider-config/`: generated MCP config files, Claude session-hook settings
   and events (`{name}-session-*.json[l]`), CLI exit codes (`{name}-exit-code`).

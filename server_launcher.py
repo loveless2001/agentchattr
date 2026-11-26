@@ -194,6 +194,6 @@ class ServerLauncher:
             return ["--dangerously-skip-permissions"]
         if agent_name == "codex":
             return ["--dangerously-bypass-approvals-and-sandbox"]
-        if agent_name == "gemini":
-            return ["--yolo"]
+        if agent_name == "gemini":  # runs the Antigravity CLI (agy)
+            return ["--dangerously-skip-permissions"]
         return []

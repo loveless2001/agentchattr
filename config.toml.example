@@ -23,7 +23,7 @@ color = "#10a37f"
 label = "Codex"
 
 [agents.gemini]
-command = "gemini"
+command = "agy"
 cwd = ".."
 color = "#4285f4"
 label = "Gemini"
@@ -90,6 +90,8 @@ max_hours = 24              # stop pinging for waits older than this
 #   "env"           - write a settings file, expose path via mcp_env_var
 #   "flag"          - write a config file, pass via CLI flag (mcp_flag, default: --mcp-config)
 #   "proxy_flag"    - start a local proxy, pass URL via CLI flag template
+#   "proxy_agy_config" - start a local proxy, run agy with HOME set to a per-instance
+#                     overlay of the real home whose mcp_config.json points at it
 #
 # Example: Qwen Code CLI
 #   [agents.qwen]

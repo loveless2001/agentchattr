@@ -28,6 +28,12 @@ import time
 from pathlib import Path
 
 from agent_crash_recovery import CrashRecoveryPolicy, nudge_prompt
+from agy_mcp_config import (
+    agy_mcp_config_path,
+    build_agy_home_overlay,
+    remove_agy_mcp_entry,
+    write_agy_mcp_entry,
+)
 from agent_session_monitor import (
     DEFAULT_CONTEXT_WINDOWS,
     SESSION_EVENTS_ENV,
@@ -138,10 +144,12 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
         "mcp_transport": "http",
         "mcp_merge_project": True,  # include unity-mcp etc.
     },
+    # The gemini agent runs the Antigravity CLI (agy), which only reads MCP
+    # servers from $HOME, so each instance gets a proxy plus its own HOME
+    # overlay (see agy_mcp_config).
     "gemini": {
-        "mcp_inject": "env",
-        "mcp_env_var": "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-        "mcp_transport": "http",  # streamable-http; SSE has blocking issues in Gemini 0.32.x
+        "mcp_inject": "proxy_agy_config",
+        "mcp_transport": "http",
     },
     "codex": {
         "mcp_inject": "proxy_flag",
@@ -154,7 +162,9 @@ _BUILTIN_DEFAULTS: dict[str, dict] = {
     },
 }
 
-_VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag"}
+_VALID_INJECT_MODES = {"settings_file", "env", "flag", "proxy_flag", "proxy_agy_config"}
+# Modes that run a local identity proxy (it holds the token, so no config rewrites)
+_PROXY_INJECT_MODES = {"proxy_flag", "proxy_agy_config"}
 
 
 def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
@@ -248,6 +258,21 @@ def _apply_mcp_inject(
                                   '-c mcp_servers.{server}.url="{url}"')
         expanded = template.format(server=SERVER_NAME, url=proxy_url or "")
         launch_args = expanded.split()
+
+    elif mode == "proxy_agy_config" and sys.platform == "win32":
+        # No HOME overlay on Windows: point the user's own agy config at the proxy
+        settings_path = write_agy_mcp_entry(
+            agy_mcp_config_path(Path.home()), SERVER_NAME, proxy_url or "",
+        )
+
+    elif mode == "proxy_agy_config":
+        # agy reads MCP servers only from $HOME: run it in a per-instance HOME
+        # overlay whose mcp_config.json points at this instance's proxy
+        overlay_home = data_dir / "agy-home" / instance_name
+        settings_path = build_agy_home_overlay(
+            overlay_home, Path.home(), SERVER_NAME, proxy_url or "",
+        )
+        inject_env["HOME"] = str(overlay_home)
 
     return launch_args, inject_env, settings_path
 
@@ -684,14 +709,14 @@ def main():
 
     # Resolve MCP injection mode to determine if a proxy is needed.
     # Direct-connect modes (settings_file, env, flag) don't need a proxy.
-    # proxy_flag mode needs a proxy. No mcp_inject = proxy fallback.
+    # Proxy modes (proxy_flag, proxy_agy_config) need one. No mcp_inject = proxy fallback.
     inject_cfg = _resolve_mcp_inject(agent, agent_cfg)
     inject_mode = inject_cfg.get("mcp_inject", "")
     if inject_mode and inject_mode not in _VALID_INJECT_MODES:
         print(f"  Error: unknown mcp_inject mode '{inject_mode}' for agent '{agent}'.")
         print(f"  Valid modes: {', '.join(sorted(_VALID_INJECT_MODES))}")
         sys.exit(1)
-    needs_proxy = inject_mode in ("proxy_flag", "") or not inject_mode
+    needs_proxy = inject_mode in _PROXY_INJECT_MODES or not inject_mode
 
     if needs_proxy:
         from mcp_proxy import McpIdentityProxy
@@ -787,9 +812,9 @@ def main():
 
     project_dir = (ROOT / cwd).resolve()
 
-    # Gemini: ensure the project directory is trusted so MCPs are allowed.
-    # Gemini blocks ALL MCPs for untrusted folders — even system-settings ones.
-    if agent == "gemini" or inject_cfg.get("mcp_inject") == "env":
+    # Gemini CLI (env mode): ensure the project directory is trusted so MCPs
+    # are allowed. It blocks ALL MCPs for untrusted folders — even system-settings ones.
+    if inject_cfg.get("mcp_inject") == "env":
         _ensure_gemini_folder_trusted(project_dir)
 
     launch_args, env, inject_env, mcp_settings_path = _build_provider_launch(
@@ -812,6 +837,8 @@ def main():
             print(f"  Config: {mcp_settings_path}")
     elif proxy_url:
         print(f"  Local MCP proxy: {proxy_url}")
+        if mcp_settings_path:
+            print(f"  Config: {mcp_settings_path}")
     print(f"  @{assigned_name} mentions auto-inject MCP reads")
     print(f"  Starting {command} in {cwd}...\n")
 
@@ -1016,6 +1043,12 @@ def main():
             print(f"  Deregistered {current_name}")
         except Exception:
             pass
+
+        if inject_mode == "proxy_agy_config" and sys.platform == "win32" and proxy_url:
+            try:  # Windows writes the real agy config; undo it if still ours
+                remove_agy_mcp_entry(agy_mcp_config_path(Path.home()), SERVER_NAME, proxy_url)
+            except Exception:
+                pass
 
         if proxy is not None:
             proxy.stop()

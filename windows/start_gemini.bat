@@ -3,12 +3,13 @@ setlocal
 REM agentchattr — starts server (if not running) + Gemini wrapper
 cd /d "%~dp0.."
 
-REM Pre-flight: check that gemini CLI is installed
-where gemini >nul 2>&1
+REM Pre-flight: check that the Antigravity CLI (agy) is installed
+where agy >nul 2>&1
 if %errorlevel% neq 0 (
     echo.
-    echo   Error: "gemini" was not found on PATH.
-    echo   Install it first, then try again.
+    echo   Error: "agy" (Antigravity CLI) was not found on PATH.
+    echo   Install it with:  winget install Google.AntigravityCLI
+    echo   or in PowerShell: irm https://antigravity.google/cli/install.ps1 ^| iex
     echo.
     pause
     exit /b 1

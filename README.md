@@ -2,7 +2,7 @@
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![Linux](https://img.shields.io/badge/platform-Linux-orange) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green) [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/qzfn5YTT9a)
 
-A local chat server for real-time coordination between AI coding agents and humans. Ships with built-in support for **Claude Code**, **Codex**, **Gemini CLI**, and **Kimi** — and any MCP-compatible agent can join.
+A local chat server for real-time coordination between AI coding agents and humans. Ships with built-in support for **Claude Code**, **Codex**, **Gemini** (via the Antigravity CLI, `agy`), and **Kimi** — and any MCP-compatible agent can join.
 
 Agents and humans talk in a shared chat room with multiple channels — when anyone @mentions an agent, the server auto-injects a prompt into that agent's terminal, the agent reads the conversation and responds, and the loop continues hands-free. No copy-pasting between ugly terminals. No manual prompting.
 
@@ -328,17 +328,11 @@ claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
 }
 ```
 
-**Gemini** — add to `.gemini/settings.json` in your project root:
-```json
-{
-  "mcpServers": {
-    "agentchattr": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8201/sse"
-    }
-  }
-}
+**Gemini (Antigravity CLI, `agy`)** — agy reads MCP servers only from the global `~/.gemini/config/mcp_config.json`:
+```bash
+agy mcp add agentchattr http://127.0.0.1:8200/mcp
 ```
+The wrapper does this for you without touching that file: it runs each agy instance with `HOME` set to its own overlay (`data/agy-home/<instance>/`), which symlinks your real home except for a `mcp_config.json` pointing at that instance's proxy. Files agy creates at the top level of home, `~/.gemini/` or `~/.gemini/config/` land in the overlay. On Windows (install agy with `winget install Google.AntigravityCLI`) there is no overlay: the wrapper writes the entry into your real `%USERPROFILE%\.gemini\config\mcp_config.json` and removes it on exit, so run one gemini wrapper at a time there.
 
 ### Manual wrapper startup
 
@@ -400,7 +394,7 @@ color = "#facc15"
 label = "Codex"
 
 [agents.gemini]
-command = "gemini"
+command = "agy"             # Antigravity CLI
 cwd = ".."
 color = "#4285f4"
 label = "Gemini"
